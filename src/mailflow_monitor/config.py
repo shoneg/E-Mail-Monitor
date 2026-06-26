@@ -37,18 +37,28 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     except OSError as exc:
         raise ConfigError(f"config: cannot read file: {config_path}") from exc
 
-    expanded_text = _expand_environment(raw_text)
     try:
-        data = tomllib.loads(expanded_text)
+        data = tomllib.loads(raw_text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"config: invalid TOML: {exc}") from exc
 
     if not isinstance(data, dict):
         raise ConfigError("config: top-level value must be a TOML table")
-    return _parse_app_config(data, config_path)
+    expanded_data = _expand_environment_values(data)
+    return _parse_app_config(expanded_data, config_path)
 
 
-def _expand_environment(text: str) -> str:
+def _expand_environment_values(value: Any) -> Any:
+    if isinstance(value, str):
+        return _expand_environment_string(value)
+    if isinstance(value, list):
+        return [_expand_environment_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_environment_values(item) for key, item in value.items()}
+    return value
+
+
+def _expand_environment_string(text: str) -> str:
     def replace(match: re.Match[str]) -> str:
         name = match.group(1)
         try:

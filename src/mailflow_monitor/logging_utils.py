@@ -35,5 +35,11 @@ def configure_logging(level: str) -> None:
         level=numeric_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    logging.getLogger().addFilter(SecretRedactingFilter())
+    for handler in logging.getLogger().handlers:
+        _ensure_redacting_filter(handler)
 
+
+def _ensure_redacting_filter(handler: logging.Handler) -> None:
+    if any(isinstance(existing, SecretRedactingFilter) for existing in handler.filters):
+        return
+    handler.addFilter(SecretRedactingFilter())

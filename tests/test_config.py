@@ -60,6 +60,53 @@ expect_at = ["recipient"]
         load_config(path)
 
 
+def test_environment_expansion_happens_after_toml_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dangerous_value = 'quote" and newline\n[[routes]]\nid = "not-a-real-route"'
+    monkeypatch.setenv("SPECIAL_PASSWORD", dangerous_value)
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[monitor]
+state_file = "var/state.json"
+lock_file = "var/lock"
+
+[addresses.sender]
+address = "sender@example.net"
+[addresses.sender.smtp]
+host = "smtp.example.net"
+port = 587
+tls_mode = "starttls"
+username = "sender@example.net"
+password = "${SPECIAL_PASSWORD}"
+
+[addresses.recipient]
+address = "recipient@example.net"
+[addresses.recipient.imap]
+host = "imap.example.net"
+port = 993
+tls_mode = "ssl"
+username = "recipient@example.net"
+password = "secret"
+mailboxes = ["INBOX"]
+
+[[routes]]
+id = "route"
+from = "sender"
+[[routes.deliveries]]
+to = "recipient"
+expect_at = ["recipient"]
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.addresses["sender"].smtp.password == dangerous_value
+
+
 def test_invalid_route_reference_reports_config_path(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(
@@ -173,4 +220,3 @@ expect_at = ["recipient"]
 
     config = load_config(path)
     assert config.addresses["sender"].smtp.tls_mode is TlsMode.PLAIN
-
