@@ -1,0 +1,106 @@
+# Example configuration for mailflow-monitor.
+# Copy this file to config.toml and adjust hosts, addresses, and environment variables.
+
+[monitor]
+# Relative paths are resolved relative to this TOML file.
+state_file = "var/state.json"
+lock_file = "var/mailflow-monitor.lock"
+log_level = "INFO"
+default_timeout_seconds = 900
+default_poll_interval_seconds = 30
+
+# Disabled by default. When enabled, only messages with the exact current token
+# are marked deleted after a successful match.
+cleanup_received_test_messages = false
+
+[addresses.stalwart_sender]
+address = "monitor@stalwart.example"
+
+[addresses.stalwart_sender.smtp]
+host = "mail.stalwart.example"
+port = 587
+tls_mode = "starttls"
+username = "monitor@stalwart.example"
+password = "${STALWART_SMTP_PASSWORD}"
+
+[addresses.stalwart_recipient]
+address = "monitor-in@stalwart.example"
+
+[addresses.stalwart_recipient.imap]
+host = "mail.stalwart.example"
+port = 993
+tls_mode = "ssl"
+username = "monitor-in@stalwart.example"
+password = "${STALWART_IMAP_PASSWORD}"
+mailboxes = ["INBOX", "Junk"]
+
+[addresses.external_sender]
+address = "monitor@example-external.net"
+
+[addresses.external_sender.smtp]
+host = "smtp.example-external.net"
+port = 587
+tls_mode = "starttls"
+username = "monitor@example-external.net"
+password = "${EXTERNAL_SMTP_PASSWORD}"
+
+[addresses.external_recipient]
+address = "monitor-target@example-external.net"
+
+[addresses.external_recipient.imap]
+host = "imap.example-external.net"
+port = 993
+tls_mode = "ssl"
+username = "monitor-target@example-external.net"
+password = "${EXTERNAL_IMAP_PASSWORD}"
+mailboxes = ["INBOX", "Spam"]
+
+# This address has no SMTP or IMAP settings because it is only a delivery target.
+# The expected message is verified in external_recipient below.
+[addresses.anonaddy_alias]
+address = "some-alias@anonaddy.example"
+
+[[routes]]
+id = "external-to-stalwart"
+description = "External mailbox sends to the Stalwart mailbox"
+from = "external_sender"
+timeout_seconds = 900
+poll_interval_seconds = 30
+
+[[routes.deliveries]]
+to = "stalwart_recipient"
+expect_at = ["stalwart_recipient"]
+
+[[routes]]
+id = "stalwart-to-external"
+description = "Stalwart mailbox sends to an external mailbox"
+from = "stalwart_sender"
+
+[[routes.deliveries]]
+to = "external_recipient"
+expect_at = ["external_recipient"]
+
+[[routes]]
+id = "stalwart-via-anonaddy"
+description = "Stalwart sends through an addy.io/AnonAddy alias to an external mailbox"
+from = "stalwart_sender"
+timeout_seconds = 1200
+
+[[routes.deliveries]]
+to = "anonaddy_alias"
+expect_at = ["external_recipient"]
+
+[notifications.alerts]
+enabled = true
+sender = "external_sender"
+recipients = ["account:external_recipient", "private-address@example.net"]
+repeat_after_seconds = 21600
+send_recovery_message = true
+
+[notifications.aliveness]
+enabled = true
+sender = "external_sender"
+recipients = ["private-address@example.net"]
+interval_seconds = 604800
+only_when_healthy = true
+

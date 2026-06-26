@@ -1,0 +1,10 @@
+[Unit]
+Description=Mailflow Monitor check
+Documentation=README.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.config/mailflow-monitor
+EnvironmentFile=-%h/.config/mailflow-monitor/.env
+ExecStart=%h/.local/bin/mailflow-monitor check --config %h/.config/mailflow-monitor/config.toml
+
