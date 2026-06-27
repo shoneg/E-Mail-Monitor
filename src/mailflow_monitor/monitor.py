@@ -273,7 +273,7 @@ def build_test_message(
     message["Subject"] = f"[mailflow-monitor] route={route_id} token={token}"
     message["Date"] = format_datetime(created_at)
     message["Message-ID"] = make_msgid(
-        idstring=f"mailflow-{route_id}",
+        idstring=f"mailflow-{route_id}-{token}",
         domain="mailflow-monitor.local",
     )
     message["X-Mailflow-Monitor-Token"] = token

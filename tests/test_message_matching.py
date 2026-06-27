@@ -18,6 +18,19 @@ class FakeFetchConnection:
         return "OK", [(b"1 FETCH", self.raw_headers)]
 
 
+class FakeSearchConnection:
+    def __init__(self) -> None:
+        self.criteria: list[tuple[str, ...]] = []
+
+    def uid(self, command: str, charset: None, *criteria: str):
+        assert command == "SEARCH"
+        assert charset is None
+        self.criteria.append(criteria)
+        if criteria[0] == "TEXT":
+            return "OK", [b"42"]
+        return "OK", [b""]
+
+
 def test_test_message_contains_exact_token_and_route_headers() -> None:
     created_at = datetime(2026, 1, 1, tzinfo=UTC)
     message = build_test_message(
@@ -31,6 +44,7 @@ def test_test_message_contains_exact_token_and_route_headers() -> None:
     assert message["X-Mailflow-Monitor-Token"] == "abc123"
     assert message["X-Mailflow-Monitor-Route"] == "route-a"
     assert "abc123" in message["Subject"]
+    assert "abc123" in message["Message-ID"]
 
 
 def test_imap_header_matching_requires_exact_current_token() -> None:
@@ -111,3 +125,20 @@ def test_imap_subject_fallback_rejects_wrong_route_and_non_exact_subject() -> No
         "exact-token",
         "route-a",
     )
+
+
+def test_imap_candidate_search_includes_standard_headers_and_message_body() -> None:
+    client = ImapClient(
+        ImapConfig(
+            host="imap.example.net",
+            port=993,
+            tls_mode=TlsMode.SSL,
+            username="user",
+            password="secret",
+        )
+    )
+    connection = FakeSearchConnection()
+
+    assert client._search_candidates(connection, "exact-token", "INBOX") == [b"42"]
+    assert ("HEADER", "Message-ID", "exact-token") in connection.criteria
+    assert ("TEXT", "exact-token") in connection.criteria

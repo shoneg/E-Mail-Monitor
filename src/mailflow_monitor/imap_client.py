@@ -15,6 +15,7 @@ from .smtp_client import create_tls_context
 LOGGER = logging.getLogger(__name__)
 TOKEN_HEADER = "X-Mailflow-Monitor-Token"
 ROUTE_HEADER = "X-Mailflow-Monitor-Route"
+MESSAGE_ID_HEADER = "Message-ID"
 
 
 class ImapClient:
@@ -74,7 +75,7 @@ class ImapClient:
         if status != "OK":
             raise ImapError(f"IMAP: cannot select mailbox '{mailbox}' on host={self.config.host}")
 
-        candidate_uids = self._search_candidates(connection, token)
+        candidate_uids = self._search_candidates(connection, token, mailbox)
         for uid in candidate_uids:
             if self._message_has_exact_token(connection, uid, token, route_id):
                 if cleanup:
@@ -86,16 +87,27 @@ class ImapClient:
         self,
         connection: imaplib.IMAP4 | imaplib.IMAP4_SSL,
         token: str,
+        mailbox: str,
     ) -> list[bytes]:
         uids: list[bytes] = []
         for criteria in (
             ("HEADER", TOKEN_HEADER, token),
+            ("HEADER", MESSAGE_ID_HEADER, token),
             ("SUBJECT", token),
+            ("TEXT", token),
         ):
             # None intentionally omits CHARSET; every search value here is ASCII.
             status, data = connection.uid("SEARCH", None, *criteria)  # type: ignore[arg-type]
             if status == "OK" and data:
-                uids.extend(_split_uid_response(data[0]))
+                matches = _split_uid_response(data[0])
+                LOGGER.debug(
+                    "IMAP candidate search: host=%s mailbox=%s criterion=%s matches=%d",
+                    self.config.host,
+                    mailbox,
+                    _describe_search_criteria(criteria),
+                    len(matches),
+                )
+                uids.extend(matches)
         return list(dict.fromkeys(uids))
 
     def _message_has_exact_token(
@@ -145,6 +157,12 @@ def _split_uid_response(value: bytes | str) -> list[bytes]:
     if isinstance(value, str):
         value = value.encode()
     return [item for item in value.split() if item]
+
+
+def _describe_search_criteria(criteria: tuple[str, ...]) -> str:
+    if criteria[0] == "HEADER":
+        return f"HEADER {criteria[1]}"
+    return criteria[0]
 
 
 def _extract_fetch_payload(
