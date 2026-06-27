@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .logging_utils import normalize_log_level
 from .models import (
     AddressConfig,
     AlertsConfig,
@@ -24,6 +25,7 @@ from .models import (
     TlsMode,
 )
 
+LOG_LEVEL_ENV_VAR = "MAILFLOW_MONITOR_LOG_LEVEL"
 ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -47,7 +49,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         raise ConfigError("config: top-level value must be a TOML table")
     environment = {**_load_dotenv(config_path.with_name(".env")), **os.environ}
     expanded_data = _expand_environment_values(data, environment)
-    return _parse_app_config(expanded_data, config_path)
+    return _parse_app_config(expanded_data, config_path, environment)
 
 
 def _load_dotenv(path: Path) -> dict[str, str]:
@@ -128,9 +130,13 @@ def _expand_environment_string(text: str, environment: Mapping[str, str]) -> str
     return ENV_VAR_PATTERN.sub(replace, text)
 
 
-def _parse_app_config(data: Mapping[str, Any], config_path: Path) -> AppConfig:
+def _parse_app_config(
+    data: Mapping[str, Any],
+    config_path: Path,
+    environment: Mapping[str, str],
+) -> AppConfig:
     base_dir = config_path.parent
-    monitor = _parse_monitor(_require_mapping(data, "monitor"), base_dir)
+    monitor = _parse_monitor(_require_mapping(data, "monitor"), base_dir, environment)
     addresses = _parse_addresses(_require_mapping(data, "addresses"), base_dir)
     routes = _parse_routes(data.get("routes", []), monitor)
     notifications = _parse_notifications(_optional_mapping(data, "notifications"), addresses)
@@ -144,7 +150,11 @@ def _parse_app_config(data: Mapping[str, Any], config_path: Path) -> AppConfig:
     )
 
 
-def _parse_monitor(data: Mapping[str, Any], base_dir: Path) -> MonitorConfig:
+def _parse_monitor(
+    data: Mapping[str, Any],
+    base_dir: Path,
+    environment: Mapping[str, str],
+) -> MonitorConfig:
     state_file = _resolve_relative_path(
         _get_str(data, "state_file", "monitor.state_file", default="var/state.json"),
         base_dir,
@@ -175,10 +185,19 @@ def _parse_monitor(data: Mapping[str, Any], base_dir: Path) -> MonitorConfig:
             "monitor.default_poll_interval_seconds: must not be greater than "
             "monitor.default_timeout_seconds"
         )
+    configured_log_level = _get_str(data, "log_level", "monitor.log_level", default="INFO")
+    log_level = environment.get(LOG_LEVEL_ENV_VAR, configured_log_level)
+    try:
+        log_level = normalize_log_level(log_level)
+    except ValueError as exc:
+        source = "monitor.log_level"
+        if LOG_LEVEL_ENV_VAR in environment:
+            source = LOG_LEVEL_ENV_VAR
+        raise ConfigError(f"{source}: {exc}") from exc
     return MonitorConfig(
         state_file=str(state_file),
         lock_file=str(lock_file),
-        log_level=_get_str(data, "log_level", "monitor.log_level", default="INFO"),
+        log_level=log_level,
         default_timeout_seconds=default_timeout,
         default_poll_interval_seconds=default_poll,
         default_send_interval_seconds=default_send_interval,

@@ -202,6 +202,34 @@ to = "recipient"
     assert config.addresses["sender"].smtp.password == "from-process"
 
 
+def test_dotenv_log_level_overrides_toml(
+    tmp_path: Path,
+    example_env: None,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(Path("config.example.toml").read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "MAILFLOW_MONITOR_LOG_LEVEL=debug\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.monitor.log_level == "DEBUG"
+
+
+def test_invalid_environment_log_level_fails(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("[monitor]\n[addresses]\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "MAILFLOW_MONITOR_LOG_LEVEL=verbose\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="MAILFLOW_MONITOR_LOG_LEVEL"):
+        load_config(path)
+
+
 def test_invalid_dotenv_entry_fails_with_line_number(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text("[monitor]\n[addresses]\n", encoding="utf-8")

@@ -75,6 +75,10 @@ the selected `config.toml`. Variables already present in the process environment
 precedence. Any string value can reference `${VARIABLE_NAME}`. If a referenced
 variable is missing, validation fails with a clear error.
 
+The effective logging level is selected in this order:
+`--log-level`, `MAILFLOW_MONITOR_LOG_LEVEL` from the process environment or `.env`,
+then `monitor.log_level` from `config.toml`.
+
 Relative paths such as `state_file`, `lock_file`, and `ca_file` are resolved relative to the configuration file location.
 
 ## Configuration Reference
@@ -167,6 +171,7 @@ mailflow-monitor validate-config --config ./config.toml
 mailflow-monitor check --config ./config.toml
 mailflow-monitor check --config ./config.toml --route stalwart-via-anonaddy
 mailflow-monitor check --config ./config.toml --route stalwart-via-anonaddy --force
+mailflow-monitor check --config ./config.toml --log-level DEBUG
 mailflow-monitor check --config ./config.toml --json
 ```
 
@@ -219,7 +224,11 @@ separate configuration setting.
 
 ## Logging and Troubleshooting
 
-Set `monitor.log_level = "DEBUG"` for detailed diagnostics. The monitor never intentionally logs passwords, tokens from configuration, or full SMTP/IMAP credentials. Route failures include route ID, direction, affected account where applicable, and error class.
+Use `--log-level DEBUG`, set `MAILFLOW_MONITOR_LOG_LEVEL=DEBUG` in `.env`, or set
+`monitor.log_level = "DEBUG"` for detailed diagnostics. The CLI option has highest
+priority. The monitor never intentionally logs passwords, tokens from configuration,
+or full SMTP/IMAP credentials. Route failures include route ID, direction, affected
+account where applicable, and error class.
 
 If a state file is corrupted, the program fails instead of guessing state. Fix or remove the state file after confirming the operational impact.
 

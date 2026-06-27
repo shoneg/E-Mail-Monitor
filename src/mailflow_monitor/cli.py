@@ -7,7 +7,7 @@ import logging
 import sys
 
 from .config import load_config
-from .logging_utils import configure_logging
+from .logging_utils import VALID_LOG_LEVELS, configure_logging, normalize_log_level
 from .models import ConfigError
 from .monitor import MailflowMonitor, render_text_summary, result_to_json
 
@@ -19,6 +19,26 @@ EXIT_RUNTIME_ERROR = 3
 LOGGER = logging.getLogger(__name__)
 
 
+def _parse_log_level(value: str) -> str:
+    try:
+        return normalize_log_level(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", default="config.toml", help="path to TOML configuration")
+    parser.add_argument(
+        "--log-level",
+        type=_parse_log_level,
+        metavar="LEVEL",
+        help=(
+            "override logging level "
+            f"({', '.join(VALID_LOG_LEVELS)}); takes precedence over environment and config"
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
 
@@ -26,10 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate = subparsers.add_parser("validate-config", help="validate configuration only")
-    validate.add_argument("--config", default="config.toml", help="path to TOML configuration")
+    _add_common_arguments(validate)
 
     check = subparsers.add_parser("check", help="run mailflow checks")
-    check.add_argument("--config", default="config.toml", help="path to TOML configuration")
+    _add_common_arguments(check)
     check.add_argument(
         "--route",
         action="append",
@@ -52,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = load_config(args.config)
-        configure_logging(config.monitor.log_level)
+        configure_logging(args.log_level or config.monitor.log_level)
         if args.command == "validate-config":
             print(f"Configuration OK: {config.config_path}")
             return EXIT_OK
@@ -64,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_RUNTIME_ERROR
         return EXIT_OK if result.success else EXIT_ROUTE_FAILED
     except ConfigError as exc:
-        configure_logging("INFO")
+        configure_logging(args.log_level or "INFO")
         LOGGER.error("%s", exc)
         print(f"Configuration error: {exc}", file=sys.stderr)
         return EXIT_CONFIG_ERROR

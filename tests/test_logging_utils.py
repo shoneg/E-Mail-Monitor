@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import logging
 
-from mailflow_monitor.logging_utils import configure_logging
+import pytest
+
+from mailflow_monitor.logging_utils import configure_logging, normalize_log_level
+
+
+def test_normalize_log_level_is_case_insensitive_and_rejects_unknown_values() -> None:
+    assert normalize_log_level(" debug ") == "DEBUG"
+
+    with pytest.raises(ValueError, match="unsupported log level"):
+        normalize_log_level("verbose")
 
 
 def test_configure_logging_redacts_child_logger_records(capsys) -> None:
