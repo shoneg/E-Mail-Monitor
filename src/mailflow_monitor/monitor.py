@@ -7,6 +7,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
@@ -66,7 +67,7 @@ class MailflowMonitor:
             skipped_route_ids = tuple(
                 route.id for route in selected_routes if route not in due_routes
             )
-            results = tuple(self._run_route(route) for route in due_routes)
+            results = self._run_routes(due_routes)
             self._update_state_from_results(state, results)
 
             selected_route_ids = tuple(route.id for route in selected_routes)
@@ -99,6 +100,16 @@ class MailflowMonitor:
                 skipped_route_ids=skipped_route_ids,
             )
 
+    def _run_routes(self, routes: tuple[RouteConfig, ...]) -> tuple[RouteRunResult, ...]:
+        if len(routes) < 2:
+            return tuple(self._run_route(route) for route in routes)
+
+        with ThreadPoolExecutor(
+            max_workers=len(routes),
+            thread_name_prefix="mailflow-route",
+        ) as executor:
+            return tuple(executor.map(self._run_route, routes))
+
     @staticmethod
     def _is_route_due(route: RouteConfig, state: MonitorState, now: datetime) -> bool:
         if route.send_interval_seconds is None:
@@ -125,14 +136,22 @@ class MailflowMonitor:
         started_at = self.now_factory()
         token = uuid.uuid4().hex
         direction = self._route_direction(route)
+        LOGGER.info("Route started: route=%s direction=%s", route.id, direction)
         try:
             self._send_test_message(route, token, started_at)
             expected_ids = _unique_expected_ids(route)
             if expected_ids:
+                LOGGER.info(
+                    "Waiting for delivery: route=%s accounts=%s timeout=%ss",
+                    route.id,
+                    ",".join(expected_ids),
+                    route.timeout_seconds,
+                )
                 self._wait_for_expected_mailboxes(route, token)
                 outcome = "succeeded"
             else:
                 outcome = "sent (delivery verification disabled)"
+            LOGGER.info("Route completed: route=%s outcome=%s", route.id, outcome)
             return RouteRunResult(
                 route_id=route.id,
                 success=True,

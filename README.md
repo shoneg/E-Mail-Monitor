@@ -172,6 +172,9 @@ mailflow-monitor check --config ./config.toml --json
 
 Text summaries are written to stdout. Detailed logs are written to stderr.
 `--force` bypasses `send_interval_seconds`, which is useful for a manual test.
+All due routes run concurrently, while result output retains configuration order.
+Consequently, the total wait is bounded by the slowest route rather than the sum of
+all route timeouts.
 
 Exit codes:
 

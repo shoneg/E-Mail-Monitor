@@ -4,6 +4,7 @@ from contextlib import suppress
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from threading import Event, Lock
 
 from mailflow_monitor.imap_client import ImapError
 from mailflow_monitor.models import SmtpError
@@ -217,6 +218,47 @@ def test_send_only_route_succeeds_without_imap_check(loaded_example_config) -> N
     assert result.success is True
     assert FakeImapClient.calls == []
     assert "verification disabled" in result.route_results[0].message
+
+
+def test_due_routes_run_concurrently_and_results_keep_config_order(
+    loaded_example_config,
+) -> None:
+    first, second = loaded_example_config.routes[:2]
+    routes = tuple(
+        replace(route, deliveries=(replace(route.deliveries[0], expect_at=()),))
+        for route in (first, second)
+    )
+    config = replace(loaded_example_config, routes=routes)
+    all_routes_started = Event()
+    start_lock = Lock()
+    started_route_count = 0
+
+    class ConcurrentSmtpClient(FakeSmtpClient):
+        def send_message(self, sender: str, recipients: list[str], message) -> None:
+            nonlocal started_route_count
+            if message.get("X-Mailflow-Monitor-Token"):
+                with start_lock:
+                    started_route_count += 1
+                    if started_route_count == len(routes):
+                        all_routes_started.set()
+                if not all_routes_started.wait(timeout=1):
+                    raise SmtpError("routes did not run concurrently")
+            super().send_message(sender, recipients, message)
+
+    monitor = MailflowMonitor(
+        config,
+        smtp_client_factory=ConcurrentSmtpClient,
+        imap_client_factory=FakeImapClient,
+    )
+
+    result = monitor.check()
+
+    assert result.success is True
+    assert started_route_count == 2
+    assert tuple(route.route_id for route in result.route_results) == (
+        "external-to-stalwart",
+        "stalwart-to-external",
+    )
 
 
 def _sequence(*values: float):
