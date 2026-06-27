@@ -35,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="route ID to run; can be used multiple times",
     )
+    check.add_argument(
+        "--force",
+        action="store_true",
+        help="run selected routes even when their send interval has not elapsed",
+    )
     check.add_argument("--json", action="store_true", help="print machine-readable JSON result")
     return parser
 
@@ -53,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_OK
 
         monitor = MailflowMonitor(config)
-        result = monitor.check(route_ids=args.route)
+        result = monitor.check(route_ids=args.route, force=args.force)
         print(result_to_json(result) if args.json else render_text_summary(result))
         if result.notification_failed:
             return EXIT_RUNTIME_ERROR

@@ -94,6 +94,7 @@ class RouteConfig:
     deliveries: tuple[DeliveryConfig, ...]
     timeout_seconds: int
     poll_interval_seconds: int
+    send_interval_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,7 @@ class MonitorConfig:
     default_timeout_seconds: int
     default_poll_interval_seconds: int
     cleanup_received_test_messages: bool = False
+    default_send_interval_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -177,3 +179,4 @@ class CheckResult:
     success: bool
     route_results: tuple[RouteRunResult, ...]
     notification_failed: bool = False
+    skipped_route_ids: tuple[str, ...] = ()

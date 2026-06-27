@@ -8,6 +8,8 @@ lock_file = "var/mailflow-monitor.lock"
 log_level = "INFO"
 default_timeout_seconds = 900
 default_poll_interval_seconds = 30
+# How often routes send a new test message. Individual routes can override this.
+default_send_interval_seconds = 3600
 
 # Disabled by default. When enabled, only messages with the exact current token
 # are marked deleted after a successful match.
@@ -60,6 +62,10 @@ mailboxes = ["INBOX", "Spam"]
 [addresses.anonaddy_alias]
 address = "some-alias@anonaddy.example"
 
+# A send-only target. Replace this with the email ping address shown by healthchecks.io.
+[addresses.healthchecks_io]
+address = "your-check-uuid@hc-ping.com"
+
 [[routes]]
 id = "external-to-stalwart"
 description = "External mailbox sends to the Stalwart mailbox"
@@ -90,6 +96,17 @@ timeout_seconds = 1200
 to = "anonaddy_alias"
 expect_at = ["external_recipient"]
 
+# This route only verifies that SMTP accepted the message. healthchecks.io performs
+# the external monitoring, so expect_at is intentionally omitted.
+[[routes]]
+id = "healthchecks-io"
+description = "Send a periodic email ping to healthchecks.io"
+from = "stalwart_sender"
+send_interval_seconds = 300
+
+[[routes.deliveries]]
+to = "healthchecks_io"
+
 [notifications.alerts]
 enabled = true
 sender = "external_sender"
@@ -103,4 +120,3 @@ sender = "external_sender"
 recipients = ["private-address@example.net"]
 interval_seconds = 604800
 only_when_healthy = true
-

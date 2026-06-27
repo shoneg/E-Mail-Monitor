@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 from mailflow_monitor.imap_client import ImapError
@@ -143,6 +144,81 @@ def test_monitor_state_file_is_updated(loaded_example_config) -> None:
     assert Path(loaded_example_config.monitor.state_file).exists()
 
 
+def test_route_is_skipped_until_send_interval_has_elapsed(
+    loaded_example_config,
+    fixed_now,
+) -> None:
+    route = next(
+        route for route in loaded_example_config.routes if route.id == "external-to-stalwart"
+    )
+    config = replace(loaded_example_config, routes=(replace(route, send_interval_seconds=300),))
+    FakeImapClient.found_usernames = {"monitor-in@stalwart.example"}
+    first_monitor = MailflowMonitor(
+        config,
+        smtp_client_factory=FakeSmtpClient,
+        imap_client_factory=FakeImapClient,
+        now_factory=lambda: fixed_now,
+    )
+
+    first_monitor.check()
+    second_result = first_monitor.check()
+
+    assert len(_sent_test_messages()) == 1
+    assert second_result.route_results == ()
+    assert second_result.skipped_route_ids == ("external-to-stalwart",)
+    assert second_result.success is True
+
+    due_monitor = MailflowMonitor(
+        config,
+        smtp_client_factory=FakeSmtpClient,
+        imap_client_factory=FakeImapClient,
+        now_factory=lambda: fixed_now + timedelta(seconds=300),
+    )
+    due_monitor.check()
+
+    assert len(_sent_test_messages()) == 2
+
+
+def test_force_bypasses_send_interval(loaded_example_config, fixed_now) -> None:
+    route = next(
+        route for route in loaded_example_config.routes if route.id == "external-to-stalwart"
+    )
+    config = replace(loaded_example_config, routes=(replace(route, send_interval_seconds=300),))
+    FakeImapClient.found_usernames = {"monitor-in@stalwart.example"}
+    monitor = MailflowMonitor(
+        config,
+        smtp_client_factory=FakeSmtpClient,
+        imap_client_factory=FakeImapClient,
+        now_factory=lambda: fixed_now,
+    )
+
+    monitor.check()
+    result = monitor.check(force=True)
+
+    assert len(_sent_test_messages()) == 2
+    assert len(result.route_results) == 1
+    assert result.skipped_route_ids == ()
+
+
+def test_send_only_route_succeeds_without_imap_check(loaded_example_config) -> None:
+    route = next(
+        route for route in loaded_example_config.routes if route.id == "external-to-stalwart"
+    )
+    delivery = replace(route.deliveries[0], expect_at=())
+    config = replace(loaded_example_config, routes=(replace(route, deliveries=(delivery,)),))
+    monitor = MailflowMonitor(
+        config,
+        smtp_client_factory=FakeSmtpClient,
+        imap_client_factory=FakeImapClient,
+    )
+
+    result = monitor.check()
+
+    assert result.success is True
+    assert FakeImapClient.calls == []
+    assert "verification disabled" in result.route_results[0].message
+
+
 def _sequence(*values: float):
     iterator = iter(values)
     last = values[-1]
@@ -154,3 +230,7 @@ def _sequence(*values: float):
         return last
 
     return next_value
+
+
+def _sent_test_messages() -> list[dict[str, object]]:
+    return [item for item in FakeSmtpClient.sent if item["message"].get("X-Mailflow-Monitor-Token")]

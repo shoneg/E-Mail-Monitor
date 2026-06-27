@@ -9,7 +9,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .models import ConfigError
 
@@ -43,10 +43,12 @@ class RouteState:
     last_success: bool | None = None
     last_checked_at: datetime | None = None
     last_error: str | None = None
+    last_sent_at: datetime | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
             "last_success": self.last_success,
+            "last_sent_at": format_dt(self.last_sent_at),
             "last_checked_at": format_dt(self.last_checked_at),
             "last_error": self.last_error,
         }
@@ -55,6 +57,7 @@ class RouteState:
     def from_json(cls, data: dict[str, Any]) -> RouteState:
         return cls(
             last_success=data.get("last_success"),
+            last_sent_at=parse_dt(data.get("last_sent_at")),
             last_checked_at=parse_dt(data.get("last_checked_at")),
             last_error=data.get("last_error"),
         )
@@ -168,7 +171,12 @@ class FileLock(AbstractContextManager["FileLock"]):
             ) from exc
         return self
 
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
+    def __exit__(
+        self,
+        exc_type: object,
+        exc: object,
+        traceback: object,
+    ) -> Literal[False]:
         if self._handle is not None:
             fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
             self._handle.close()

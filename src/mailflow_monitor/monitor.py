@@ -49,17 +49,35 @@ class MailflowMonitor:
         self.now_factory = now_factory
         self.state_store = StateStore(config.monitor.state_file)
 
-    def check(self, route_ids: Iterable[str] | None = None) -> CheckResult:
+    def check(
+        self,
+        route_ids: Iterable[str] | None = None,
+        force: bool = False,
+    ) -> CheckResult:
         """Run all configured routes or the selected subset."""
 
         selected_routes = self._select_routes(route_ids)
         with FileLock(self.config.monitor.lock_file):
             state = self.state_store.load()
-            results = tuple(self._run_route(route) for route in selected_routes)
             now = self.now_factory()
-            run_success = all(result.success for result in results)
-            failure_details = _failure_details(results)
-            self._update_state_from_results(state, results, run_success, now, failure_details)
+            due_routes = tuple(
+                route for route in selected_routes if force or self._is_route_due(route, state, now)
+            )
+            skipped_route_ids = tuple(
+                route.id for route in selected_routes if route not in due_routes
+            )
+            results = tuple(self._run_route(route) for route in due_routes)
+            self._update_state_from_results(state, results)
+
+            selected_route_ids = tuple(route.id for route in selected_routes)
+            run_success = all(
+                state.routes.get(route_id) is not None
+                and state.routes[route_id].last_success is True
+                for route_id in selected_route_ids
+            )
+            failure_details = _state_failure_details(state, selected_route_ids)
+            state.last_run_at = now
+            state.last_run_success = run_success
 
             notification_failed = False
             try:
@@ -78,7 +96,20 @@ class MailflowMonitor:
                 success=run_success,
                 route_results=results,
                 notification_failed=notification_failed,
+                skipped_route_ids=skipped_route_ids,
             )
+
+    @staticmethod
+    def _is_route_due(route: RouteConfig, state: MonitorState, now: datetime) -> bool:
+        if route.send_interval_seconds is None:
+            return True
+        route_state = state.routes.get(route.id)
+        if route_state is None:
+            return True
+        last_sent_at = route_state.last_sent_at or route_state.last_checked_at
+        if last_sent_at is None:
+            return True
+        return (now - last_sent_at).total_seconds() >= route.send_interval_seconds
 
     def _select_routes(self, route_ids: Iterable[str] | None) -> tuple[RouteConfig, ...]:
         if route_ids is None:
@@ -96,14 +127,19 @@ class MailflowMonitor:
         direction = self._route_direction(route)
         try:
             self._send_test_message(route, token, started_at)
-            self._wait_for_expected_mailboxes(route, token)
+            expected_ids = _unique_expected_ids(route)
+            if expected_ids:
+                self._wait_for_expected_mailboxes(route, token)
+                outcome = "succeeded"
+            else:
+                outcome = "sent (delivery verification disabled)"
             return RouteRunResult(
                 route_id=route.id,
                 success=True,
                 token=token,
                 started_at=started_at,
                 finished_at=self.now_factory(),
-                message=f"route={route.id} direction={direction} succeeded",
+                message=f"route={route.id} direction={direction} {outcome}",
             )
         except (SmtpError, ImapError, DeliveryTimeoutError) as exc:
             LOGGER.warning("Route failed: route=%s direction=%s error=%s", route.id, direction, exc)
@@ -193,17 +229,11 @@ class MailflowMonitor:
         self,
         state: MonitorState,
         results: tuple[RouteRunResult, ...],
-        run_success: bool,
-        now: datetime,
-        failure_details: str,
     ) -> None:
-        state.last_run_at = now
-        state.last_run_success = run_success
-        if not run_success and state.incident_details is None:
-            state.incident_details = failure_details
         for result in results:
             state.routes[result.route_id] = RouteState(
                 last_success=result.success,
+                last_sent_at=result.started_at,
                 last_checked_at=result.finished_at,
                 last_error=None if result.success else result.message,
             )
@@ -244,6 +274,7 @@ def result_to_json(result: CheckResult) -> str:
     payload = {
         "success": result.success,
         "notification_failed": result.notification_failed,
+        "skipped_routes": list(result.skipped_route_ids),
         "routes": [
             {
                 "route_id": item.route_id,
@@ -267,6 +298,8 @@ def render_text_summary(result: CheckResult) -> str:
     for item in result.route_results:
         status = "OK" if item.success else "FAIL"
         lines.append(f"- {status} {item.route_id}: {item.message}")
+    for route_id in result.skipped_route_ids:
+        lines.append(f"- SKIP {route_id}: send interval has not elapsed")
     if result.notification_failed:
         lines.append("- FAIL notifications: at least one notification could not be sent")
     overall = "OK" if result.success and not result.notification_failed else "FAIL"
@@ -282,8 +315,10 @@ def _unique_expected_ids(route: RouteConfig) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def _failure_details(results: tuple[RouteRunResult, ...]) -> str:
-    failures = [result for result in results if not result.success]
-    if not failures:
-        return ""
-    return "\n".join(f"- {item.route_id}: {item.error_class}: {item.message}" for item in failures)
+def _state_failure_details(state: MonitorState, route_ids: tuple[str, ...]) -> str:
+    failures = []
+    for route_id in route_ids:
+        route_state = state.routes.get(route_id)
+        if route_state is not None and route_state.last_success is False:
+            failures.append(f"- {route_id}: {route_state.last_error or 'route failed'}")
+    return "\n".join(failures)

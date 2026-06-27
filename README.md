@@ -2,7 +2,11 @@
 
 > Disclaimer: This project is completely vibe coded. Review, test, and operate it with the same care you would apply to any generated or externally contributed production code.
 
-`mailflow-monitor` checks configured email delivery paths end to end. It sends a unique test message through each route, searches the expected IMAP mailbox or mailboxes for the exact token, updates a local JSON state file, and sends alert, recovery, and aliveness notifications when configured.
+`mailflow-monitor` checks configured email delivery paths end to end. It sends a unique
+test message through each route, optionally searches expected IMAP mailboxes for the
+exact token, updates a local JSON state file, and sends alert, recovery, and aliveness
+notifications when configured. Send-only routes can ping external monitors such as
+healthchecks.io.
 
 ## Architecture
 
@@ -21,12 +25,16 @@ Main components:
 
 Routes deliberately separate `to` from `expect_at`.
 
-`to` is the real SMTP delivery target. `expect_at` is the IMAP account where the message must later be found. In direct paths both are often the same account. For an addy.io/AnonAddy alias they differ: SMTP delivers to the alias, but the monitor verifies the forwarded message in the external destination mailbox.
+`to` is the real SMTP delivery target. `expect_at` is the IMAP account where the
+message must later be found. In direct paths both are often the same account. For an
+addy.io/AnonAddy alias they differ: SMTP delivers to the alias, but the monitor verifies
+the forwarded message in the external destination mailbox. For send-only routes,
+`expect_at` is omitted.
 
 ## Requirements
 
 - Python 3.11 or newer
-- SMTP and IMAP access for the accounts used by the routes
+- SMTP access for senders and IMAP access for routes that verify delivery
 - Dedicated test accounts are strongly recommended
 
 ## Installation
@@ -61,7 +69,12 @@ Relative paths such as `state_file`, `lock_file`, and `ca_file` are resolved rel
 
 ## Configuration Reference
 
-`[monitor]` controls state, locking, logging, timeouts, polling, and optional cleanup. `cleanup_received_test_messages = false` is the safe default.
+`[monitor]` controls state, locking, logging, timeouts, polling, send intervals, and
+optional cleanup. `default_send_interval_seconds` limits how often each route sends a
+new message. If it is omitted, routes run on every invocation. A route-level
+`send_interval_seconds` overrides the default. `poll_interval_seconds` is separate: it
+only controls how often IMAP is queried while waiting for an already-sent message.
+`cleanup_received_test_messages = false` is the safe default.
 
 `[addresses.<id>]` defines a named email address. SMTP and IMAP sections are optional because some addresses only send, only receive, or only act as aliases.
 
@@ -73,7 +86,10 @@ TLS modes:
 
 Certificate verification is always enabled. Use `ca_file` for private CAs. There is no silent option to disable verification.
 
-`[[routes]]` defines a test path. `from` must reference an address with SMTP. Each delivery `to` must exist. Each `expect_at` entry must reference an address with IMAP.
+`[[routes]]` defines a test path. `from` must reference an address with SMTP. Each
+delivery `to` must exist. Each `expect_at` entry must reference an address with IMAP.
+Omit `expect_at` for a send-only route; it succeeds once the SMTP server accepts the
+message.
 
 `[notifications.alerts]` sends immediate and repeated incident alerts. `repeat_after_seconds` rate-limits ongoing incidents. `send_recovery_message` controls recovery notifications.
 
@@ -119,16 +135,33 @@ to = "anonaddy_alias"
 expect_at = ["external_recipient"]
 ```
 
+Send-only healthchecks.io ping:
+
+```toml
+[addresses.healthchecks_io]
+address = "your-check-uuid@hc-ping.com"
+
+[[routes]]
+id = "healthchecks-io"
+from = "stalwart_sender"
+send_interval_seconds = 300
+
+[[routes.deliveries]]
+to = "healthchecks_io"
+```
+
 ## Manual Execution
 
 ```bash
 mailflow-monitor validate-config --config ./config.toml
 mailflow-monitor check --config ./config.toml
 mailflow-monitor check --config ./config.toml --route stalwart-via-anonaddy
+mailflow-monitor check --config ./config.toml --route stalwart-via-anonaddy --force
 mailflow-monitor check --config ./config.toml --json
 ```
 
 Text summaries are written to stdout. Detailed logs are written to stderr.
+`--force` bypasses `send_interval_seconds`, which is useful for a manual test.
 
 Exit codes:
 
@@ -158,7 +191,10 @@ systemctl --user status mailflow-monitor.timer
 journalctl --user -u mailflow-monitor.service
 ```
 
-The example timer runs every five minutes. The test frequency is controlled by the timer. Aliveness frequency remains a configuration setting.
+The example timer wakes the program every five minutes. A route is only sent when its
+configured `send_interval_seconds` has elapsed; therefore the timer should run at least
+as often as the shortest desired route interval. Aliveness frequency remains a
+separate configuration setting.
 
 ## Cron Alternative
 

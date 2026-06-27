@@ -108,6 +108,11 @@ def _parse_monitor(data: Mapping[str, Any], base_dir: Path) -> MonitorConfig:
         "monitor.default_poll_interval_seconds",
         default=30,
     )
+    default_send_interval = _get_optional_positive_int(
+        data,
+        "default_send_interval_seconds",
+        "monitor.default_send_interval_seconds",
+    )
     if default_poll > default_timeout:
         raise ConfigError(
             "monitor.default_poll_interval_seconds: must not be greater than "
@@ -119,6 +124,7 @@ def _parse_monitor(data: Mapping[str, Any], base_dir: Path) -> MonitorConfig:
         log_level=_get_str(data, "log_level", "monitor.log_level", default="INFO"),
         default_timeout_seconds=default_timeout,
         default_poll_interval_seconds=default_poll,
+        default_send_interval_seconds=default_send_interval,
         cleanup_received_test_messages=_get_bool(
             data,
             "cleanup_received_test_messages",
@@ -246,6 +252,12 @@ def _parse_routes(raw_routes: Any, monitor: MonitorConfig) -> list[RouteConfig]:
             f"{path}.poll_interval_seconds",
             default=monitor.default_poll_interval_seconds,
         )
+        send_interval = _get_optional_positive_int(
+            table,
+            "send_interval_seconds",
+            f"{path}.send_interval_seconds",
+            default=monitor.default_send_interval_seconds,
+        )
         if poll_interval > timeout:
             raise ConfigError(
                 f"{path}.poll_interval_seconds: must not be greater than {path}.timeout_seconds"
@@ -259,6 +271,7 @@ def _parse_routes(raw_routes: Any, monitor: MonitorConfig) -> list[RouteConfig]:
                 deliveries=tuple(deliveries),
                 timeout_seconds=timeout,
                 poll_interval_seconds=poll_interval,
+                send_interval_seconds=send_interval,
             )
         )
     return routes
@@ -271,9 +284,9 @@ def _parse_deliveries(raw: Any, route_path: str) -> list[DeliveryConfig]:
     for index, raw_delivery in enumerate(raw):
         path = f"{route_path}.deliveries[{index}]"
         table = _ensure_mapping(raw_delivery, path)
-        expect_raw = table.get("expect_at")
-        if not isinstance(expect_raw, list) or not expect_raw:
-            raise ConfigError(f"{path}.expect_at: must be a non-empty list")
+        expect_raw = table.get("expect_at", [])
+        if not isinstance(expect_raw, list):
+            raise ConfigError(f"{path}.expect_at: must be a list")
         expect_at = []
         for expect_index, item in enumerate(expect_raw):
             if not isinstance(item, str) or not item:
@@ -509,5 +522,19 @@ def _get_positive_int(
         raise ConfigError(f"{path}: is required")
     value = data[key]
     if not isinstance(value, int) or value <= 0:
+        raise ConfigError(f"{path}: must be a positive integer")
+    return value
+
+
+def _get_optional_positive_int(
+    data: Mapping[str, Any],
+    key: str,
+    path: str,
+    default: int | None = None,
+) -> int | None:
+    if key not in data:
+        return default
+    value = data[key]
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ConfigError(f"{path}: must be a positive integer")
     return value
