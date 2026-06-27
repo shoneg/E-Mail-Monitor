@@ -17,6 +17,7 @@ from .models import (
     AppConfig,
     CheckResult,
     ConfigError,
+    DeliveryConfig,
     DeliveryTimeoutError,
     ImapError,
     RouteConfig,
@@ -58,6 +59,9 @@ class MailflowMonitor:
         """Run all configured routes or the selected subset."""
 
         selected_routes = self._select_routes(route_ids)
+        selected_route_ids = tuple(route.id for route in selected_routes)
+        all_route_ids = tuple(route.id for route in self.config.routes)
+        is_full_run = set(selected_route_ids) == set(all_route_ids)
         with FileLock(self.config.monitor.lock_file):
             state = self.state_store.load()
             now = self.now_factory()
@@ -70,27 +74,28 @@ class MailflowMonitor:
             results = self._run_routes(due_routes)
             self._update_state_from_results(state, results)
 
-            selected_route_ids = tuple(route.id for route in selected_routes)
             run_success = all(
                 state.routes.get(route_id) is not None
                 and state.routes[route_id].last_success is True
                 for route_id in selected_route_ids
             )
-            failure_details = _state_failure_details(state, selected_route_ids)
             state.last_run_at = now
-            state.last_run_success = run_success
+            if is_full_run or not run_success:
+                state.last_run_success = run_success
 
             notification_failed = False
-            try:
-                NotificationManager(self.config, self.smtp_client_factory).handle_after_run(
-                    state,
-                    run_success,
-                    failure_details,
-                    now,
-                )
-            except Exception as exc:
-                notification_failed = True
-                LOGGER.error("Notification delivery failed: %s", exc)
+            if is_full_run or not run_success:
+                failure_details = _state_failure_details(state, all_route_ids)
+                try:
+                    NotificationManager(self.config, self.smtp_client_factory).handle_after_run(
+                        state,
+                        run_success,
+                        failure_details,
+                        now,
+                    )
+                except Exception as exc:
+                    notification_failed = True
+                    LOGGER.error("Notification delivery failed: %s", exc)
 
             self.state_store.save(state)
             return CheckResult(
@@ -134,20 +139,22 @@ class MailflowMonitor:
 
     def _run_route(self, route: RouteConfig) -> RouteRunResult:
         started_at = self.now_factory()
-        token = uuid.uuid4().hex
+        delivery_tokens = tuple(uuid.uuid4().hex for _ in route.deliveries)
+        token = delivery_tokens[0]
+        delivery_attempts = tuple(zip(route.deliveries, delivery_tokens, strict=True))
         direction = self._route_direction(route)
         LOGGER.info("Route started: route=%s direction=%s", route.id, direction)
         try:
-            self._send_test_message(route, token, started_at)
-            expected_ids = _unique_expected_ids(route)
-            if expected_ids:
+            for delivery, delivery_token in delivery_attempts:
+                self._send_test_message(route, delivery, delivery_token, started_at)
+            if any(delivery.expect_at for delivery in route.deliveries):
                 LOGGER.info(
-                    "Waiting for delivery: route=%s accounts=%s timeout=%ss",
+                    "Waiting for delivery: route=%s deliveries=%s timeout=%ss",
                     route.id,
-                    ",".join(expected_ids),
+                    len(route.deliveries),
                     route.timeout_seconds,
                 )
-                self._wait_for_expected_mailboxes(route, token)
+                self._wait_for_expected_mailboxes(route, delivery_attempts)
                 outcome = "succeeded"
             else:
                 outcome = "sent (delivery verification disabled)"
@@ -159,6 +166,7 @@ class MailflowMonitor:
                 started_at=started_at,
                 finished_at=self.now_factory(),
                 message=f"route={route.id} direction={direction} {outcome}",
+                delivery_tokens=delivery_tokens,
             )
         except (SmtpError, ImapError, DeliveryTimeoutError) as exc:
             LOGGER.warning("Route failed: route=%s direction=%s error=%s", route.id, direction, exc)
@@ -170,6 +178,7 @@ class MailflowMonitor:
                 finished_at=self.now_factory(),
                 message=f"route={route.id} direction={direction} failed: {exc}",
                 error_class=exc.__class__.__name__,
+                delivery_tokens=delivery_tokens,
             )
         except Exception as exc:
             LOGGER.exception("Unexpected route failure: route=%s direction=%s", route.id, direction)
@@ -181,13 +190,20 @@ class MailflowMonitor:
                 finished_at=self.now_factory(),
                 message=f"route={route.id} direction={direction} failed: {exc.__class__.__name__}",
                 error_class=exc.__class__.__name__,
+                delivery_tokens=delivery_tokens,
             )
 
-    def _send_test_message(self, route: RouteConfig, token: str, now: datetime) -> None:
+    def _send_test_message(
+        self,
+        route: RouteConfig,
+        delivery: DeliveryConfig,
+        token: str,
+        now: datetime,
+    ) -> None:
         sender = self.config.addresses[route.from_id]
         if sender.smtp is None:
             raise ConfigError(f"route '{route.id}': sender '{route.from_id}' has no SMTP settings")
-        recipients = [self.config.addresses[delivery.to].address for delivery in route.deliveries]
+        recipients = [self.config.addresses[delivery.to].address]
         message = build_test_message(
             sender=sender.address,
             recipients=recipients,
@@ -199,16 +215,29 @@ class MailflowMonitor:
             self.smtp_client_factory(sender.smtp).send_message(sender.address, recipients, message)
         except SmtpError as exc:
             raise SmtpError(
-                f"route={route.id} account={route.from_id} class=SmtpError: {exc}"
+                f"route={route.id} delivery={delivery.to} account={route.from_id} "
+                f"class=SmtpError: {exc}"
             ) from exc
 
-    def _wait_for_expected_mailboxes(self, route: RouteConfig, token: str) -> None:
-        expected_ids = _unique_expected_ids(route)
-        found: set[str] = set()
+    def _wait_for_expected_mailboxes(
+        self,
+        route: RouteConfig,
+        delivery_attempts: tuple[tuple[DeliveryConfig, str], ...],
+    ) -> None:
+        expectations = tuple(
+            (delivery_index, address_id, token)
+            for delivery_index, (delivery, token) in enumerate(delivery_attempts)
+            for address_id in dict.fromkeys(delivery.expect_at)
+        )
+        expected_ids = {
+            (delivery_index, address_id) for delivery_index, address_id, _ in expectations
+        }
+        found: set[tuple[int, str]] = set()
         deadline = self.monotonic() + route.timeout_seconds
         while True:
-            for address_id in expected_ids:
-                if address_id in found:
+            for delivery_index, address_id, token in expectations:
+                expectation_id = (delivery_index, address_id)
+                if expectation_id in found:
                     continue
                 account = self.config.addresses[address_id]
                 if account.imap is None:
@@ -224,17 +253,21 @@ class MailflowMonitor:
                     )
                 except ImapError as exc:
                     raise ImapError(
-                        f"route={route.id} account={address_id} class=ImapError: {exc}"
+                        f"route={route.id} delivery={delivery_index} account={address_id} "
+                        f"class=ImapError: {exc}"
                     ) from exc
                 if has_token:
-                    found.add(address_id)
-            if found == set(expected_ids):
+                    found.add(expectation_id)
+            if found == expected_ids:
                 return
             now = self.monotonic()
             if now >= deadline:
-                missing = ", ".join(sorted(set(expected_ids) - found))
+                missing = ", ".join(
+                    f"delivery={delivery_index} account={address_id}"
+                    for delivery_index, address_id in sorted(expected_ids - found)
+                )
                 raise DeliveryTimeoutError(
-                    f"route={route.id} account={missing} class=DeliveryTimeoutError "
+                    f"route={route.id} missing={missing} class=DeliveryTimeoutError "
                     f"token was not found within {route.timeout_seconds}s"
                 )
             self.sleep(min(route.poll_interval_seconds, max(0.0, deadline - now)))
@@ -299,6 +332,7 @@ def result_to_json(result: CheckResult) -> str:
                 "route_id": item.route_id,
                 "success": item.success,
                 "token": item.token,
+                "delivery_tokens": list(item.delivery_tokens),
                 "started_at": format_dt(item.started_at),
                 "finished_at": format_dt(item.finished_at),
                 "message": item.message,
@@ -324,14 +358,6 @@ def render_text_summary(result: CheckResult) -> str:
     overall = "OK" if result.success and not result.notification_failed else "FAIL"
     lines.append(f"overall: {overall}")
     return "\n".join(lines)
-
-
-def _unique_expected_ids(route: RouteConfig) -> tuple[str, ...]:
-    seen: dict[str, None] = {}
-    for delivery in route.deliveries:
-        for address_id in delivery.expect_at:
-            seen[address_id] = None
-    return tuple(seen)
 
 
 def _state_failure_details(state: MonitorState, route_ids: tuple[str, ...]) -> str:

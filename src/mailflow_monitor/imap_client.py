@@ -142,15 +142,26 @@ class ImapClient:
         connection: imaplib.IMAP4 | imaplib.IMAP4_SSL,
         uid: bytes,
     ) -> None:
+        uid_text = uid.decode("ascii")
         status, _ = connection.uid(
             "STORE",
-            uid.decode("ascii"),
+            uid_text,
             "+FLAGS.SILENT",
             r"(\Deleted)",
         )
         if status != "OK":
             raise ImapError(f"IMAP: cannot mark uid={uid.decode(errors='ignore')} as deleted")
-        connection.expunge()
+        if not _supports_selective_expunge(connection):
+            LOGGER.info(
+                "IMAP message marked deleted but not expunged because the server "
+                "does not support UIDPLUS or IMAP4rev2: host=%s uid=%s",
+                self.config.host,
+                uid_text,
+            )
+            return
+        status, _ = connection.uid("EXPUNGE", uid_text)
+        if status != "OK":
+            raise ImapError(f"IMAP: cannot expunge uid={uid.decode(errors='ignore')}")
 
 
 def _split_uid_response(value: bytes | str) -> list[bytes]:
@@ -163,6 +174,14 @@ def _describe_search_criteria(criteria: tuple[str, ...]) -> str:
     if criteria[0] == "HEADER":
         return f"HEADER {criteria[1]}"
     return criteria[0]
+
+
+def _supports_selective_expunge(connection: imaplib.IMAP4 | imaplib.IMAP4_SSL) -> bool:
+    capabilities = {
+        item.decode("ascii", errors="ignore").upper() if isinstance(item, bytes) else item.upper()
+        for item in connection.capabilities
+    }
+    return bool({"UIDPLUS", "IMAP4REV2"} & capabilities)
 
 
 def _extract_fetch_payload(

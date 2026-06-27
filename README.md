@@ -2,11 +2,11 @@
 
 > Disclaimer: This project is completely vibe coded. Review, test, and operate it with the same care you would apply to any generated or externally contributed production code.
 
-`mailflow-monitor` checks configured email delivery paths end to end. It sends a unique
-test message through each route, optionally searches expected IMAP mailboxes for the
-exact token, updates a local JSON state file, and sends alert, recovery, and aliveness
-notifications when configured. Send-only routes can ping external monitors such as
-healthchecks.io.
+`mailflow-monitor` checks configured email delivery paths end to end. It sends a separate
+uniquely tagged test message for each delivery in a route, optionally searches expected IMAP
+mailboxes for the exact delivery token, updates a local JSON state file, and sends alert,
+recovery, and aliveness notifications when configured. Send-only routes can ping external
+monitors such as healthchecks.io.
 
 ## Architecture
 
@@ -29,7 +29,8 @@ Routes deliberately separate `to` from `expect_at`.
 message must later be found. In direct paths both are often the same account. For an
 addy.io/AnonAddy alias they differ: SMTP delivers to the alias, but the monitor verifies
 the forwarded message in the external destination mailbox. For send-only routes,
-`expect_at` is omitted.
+`expect_at` is omitted. Every delivery uses a separate message and token, so multiple
+delivery paths ending in the same verification mailbox are checked independently.
 
 ## Requirements
 
@@ -242,4 +243,9 @@ If a state file is corrupted, the program fails instead of guessing state. Fix o
 
 ## Cleanup
 
-Received test messages are never deleted unless `cleanup_received_test_messages = true`. When cleanup is enabled, the IMAP client deletes only messages whose headers contain the exact current token. Leave cleanup disabled until you have verified routing and mailbox selection.
+Received test messages are never deleted unless `cleanup_received_test_messages = true`. When
+cleanup is enabled, the IMAP client marks only messages containing the exact current token as
+deleted. Servers supporting UIDPLUS or IMAP4rev2 are asked to expunge only that message. On older
+servers, the message remains marked as deleted for later cleanup so unrelated deleted messages are
+never expunged by the monitor. Leave cleanup disabled until you have verified routing and mailbox
+selection.

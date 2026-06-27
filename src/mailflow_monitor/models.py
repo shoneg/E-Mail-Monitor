@@ -170,6 +170,7 @@ class RouteRunResult:
     finished_at: datetime
     message: str
     error_class: str | None = None
+    delivery_tokens: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

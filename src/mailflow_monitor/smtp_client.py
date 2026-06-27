@@ -49,7 +49,16 @@ class SmtpClient:
                 ):
                     raise SmtpError("SMTP: plaintext mode is not allowed by configuration")
             smtp.login(self.config.username, self.config.password)
-            smtp.send_message(message, from_addr=sender, to_addrs=recipients)
+            refused_recipients = smtp.send_message(
+                message,
+                from_addr=sender,
+                to_addrs=recipients,
+            )
+            if refused_recipients:
+                raise SmtpError(
+                    f"SMTP: {len(refused_recipients)} recipient(s) refused "
+                    f"by host={self.config.host} port={self.config.port}"
+                )
             LOGGER.debug(
                 "SMTP message sent via host=%s port=%s",
                 self.config.host,

@@ -9,6 +9,7 @@ from threading import Event, Lock
 from mailflow_monitor.imap_client import ImapError
 from mailflow_monitor.models import SmtpError
 from mailflow_monitor.monitor import MailflowMonitor
+from mailflow_monitor.state import MonitorState
 
 
 class FakeSmtpClient:
@@ -218,6 +219,104 @@ def test_send_only_route_succeeds_without_imap_check(loaded_example_config) -> N
     assert result.success is True
     assert FakeImapClient.calls == []
     assert "verification disabled" in result.route_results[0].message
+
+
+def test_each_delivery_uses_a_distinct_message_and_token(loaded_example_config) -> None:
+    route = next(
+        route for route in loaded_example_config.routes if route.id == "external-to-stalwart"
+    )
+    second_delivery = replace(route.deliveries[0], to="anonaddy_alias")
+    route = replace(route, deliveries=(route.deliveries[0], second_delivery))
+    config = replace(loaded_example_config, routes=(route,))
+    FakeImapClient.found_usernames = {"monitor-in@stalwart.example"}
+    monitor = MailflowMonitor(
+        config,
+        smtp_client_factory=FakeSmtpClient,
+        imap_client_factory=FakeImapClient,
+    )
+
+    result = monitor.check()
+
+    sent_messages = _sent_test_messages()
+    sent_tokens = tuple(str(item["message"]["X-Mailflow-Monitor-Token"]) for item in sent_messages)
+    assert result.success is True
+    assert [item["recipients"] for item in sent_messages] == [
+        ["monitor-in@stalwart.example"],
+        ["some-alias@anonaddy.example"],
+    ]
+    assert len(set(sent_tokens)) == 2
+    assert result.route_results[0].delivery_tokens == sent_tokens
+
+
+def test_one_delivery_cannot_satisfy_another_delivery_check(loaded_example_config) -> None:
+    route = next(
+        route for route in loaded_example_config.routes if route.id == "external-to-stalwart"
+    )
+    second_delivery = replace(route.deliveries[0], to="anonaddy_alias")
+    route = replace(
+        route,
+        deliveries=(route.deliveries[0], second_delivery),
+        timeout_seconds=1,
+        poll_interval_seconds=1,
+    )
+    config = replace(loaded_example_config, routes=(route,))
+
+    class OnlyFirstDeliveryArrives(FakeImapClient):
+        def find_token(self, token: str, route_id: str, cleanup: bool = False) -> bool:
+            self.calls.append(
+                {
+                    "username": self.config.username,
+                    "token": token,
+                    "route_id": route_id,
+                    "cleanup": cleanup,
+                }
+            )
+            first_message = _sent_test_messages()[0]["message"]
+            return token == first_message["X-Mailflow-Monitor-Token"]
+
+    monitor = MailflowMonitor(
+        config,
+        smtp_client_factory=FakeSmtpClient,
+        imap_client_factory=OnlyFirstDeliveryArrives,
+        monotonic=_sequence(0, 2),
+        sleep=lambda seconds: None,
+    )
+
+    result = monitor.check()
+
+    assert result.success is False
+    assert result.route_results[0].error_class == "DeliveryTimeoutError"
+    assert len({call["token"] for call in FakeImapClient.calls}) == 2
+
+
+def test_successful_partial_run_does_not_clear_global_incident(
+    loaded_example_config,
+    fixed_now,
+) -> None:
+    incident_started_at = fixed_now - timedelta(hours=1)
+    FakeImapClient.found_usernames = {"monitor-in@stalwart.example"}
+    monitor = MailflowMonitor(
+        loaded_example_config,
+        smtp_client_factory=FakeSmtpClient,
+        imap_client_factory=FakeImapClient,
+        now_factory=lambda: fixed_now,
+    )
+    monitor.state_store.save(
+        MonitorState(
+            last_run_success=False,
+            incident_started_at=incident_started_at,
+        )
+    )
+
+    result = monitor.check(route_ids=["external-to-stalwart"])
+    state = monitor.state_store.load()
+
+    assert result.success is True
+    assert state.last_run_success is False
+    assert state.incident_started_at == incident_started_at
+    assert state.last_recovery_at is None
+    assert state.last_aliveness_at is None
+    assert len(FakeSmtpClient.sent) == 1
 
 
 def test_due_routes_run_concurrently_and_results_keep_config_order(

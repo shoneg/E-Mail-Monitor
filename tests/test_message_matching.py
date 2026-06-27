@@ -31,6 +31,19 @@ class FakeSearchConnection:
         return "OK", [b""]
 
 
+class FakeDeleteConnection:
+    def __init__(self, *capabilities: bytes) -> None:
+        self.capabilities = capabilities
+        self.commands: list[tuple[str, ...]] = []
+
+    def uid(self, command: str, *arguments: str):
+        self.commands.append((command, *arguments))
+        return "OK", [b""]
+
+    def expunge(self):
+        raise AssertionError("global EXPUNGE must never be used")
+
+
 def test_test_message_contains_exact_token_and_route_headers() -> None:
     created_at = datetime(2026, 1, 1, tzinfo=UTC)
     message = build_test_message(
@@ -142,3 +155,42 @@ def test_imap_candidate_search_includes_standard_headers_and_message_body() -> N
     assert client._search_candidates(connection, "exact-token", "INBOX") == [b"42"]
     assert ("HEADER", "Message-ID", "exact-token") in connection.criteria
     assert ("TEXT", "exact-token") in connection.criteria
+
+
+def test_imap_cleanup_uses_uid_expunge_when_supported() -> None:
+    client = ImapClient(
+        ImapConfig(
+            host="imap.example.net",
+            port=993,
+            tls_mode=TlsMode.SSL,
+            username="user",
+            password="secret",
+        )
+    )
+    connection = FakeDeleteConnection(b"IMAP4rev1", b"UIDPLUS")
+
+    client._delete_message(connection, b"42")
+
+    assert connection.commands == [
+        ("STORE", "42", "+FLAGS.SILENT", r"(\Deleted)"),
+        ("EXPUNGE", "42"),
+    ]
+
+
+def test_imap_cleanup_never_globally_expunges_without_uidplus() -> None:
+    client = ImapClient(
+        ImapConfig(
+            host="imap.example.net",
+            port=993,
+            tls_mode=TlsMode.SSL,
+            username="user",
+            password="secret",
+        )
+    )
+    connection = FakeDeleteConnection(b"IMAP4rev1")
+
+    client._delete_message(connection, b"42")
+
+    assert connection.commands == [
+        ("STORE", "42", "+FLAGS.SILENT", r"(\Deleted)"),
+    ]
