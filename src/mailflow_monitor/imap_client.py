@@ -92,7 +92,8 @@ class ImapClient:
             ("HEADER", TOKEN_HEADER, token),
             ("SUBJECT", token),
         ):
-            status, data = connection.uid("SEARCH", None, *criteria)
+            # None intentionally omits CHARSET; every search value here is ASCII.
+            status, data = connection.uid("SEARCH", None, *criteria)  # type: ignore[arg-type]
             if status == "OK" and data:
                 uids.extend(_split_uid_response(data[0]))
         return list(dict.fromkeys(uids))
@@ -107,7 +108,7 @@ class ImapClient:
         fetch_query = (
             f"(BODY.PEEK[HEADER.FIELDS ({TOKEN_HEADER} {ROUTE_HEADER} SUBJECT MESSAGE-ID)])"
         )
-        status, data = connection.uid("FETCH", uid, fetch_query)
+        status, data = connection.uid("FETCH", uid.decode("ascii"), fetch_query)
         if status != "OK":
             raise ImapError(f"IMAP: cannot fetch headers for uid={uid.decode(errors='ignore')}")
         raw_headers = _extract_fetch_payload(data)
@@ -117,17 +118,24 @@ class ImapClient:
         header_token = message.get(TOKEN_HEADER)
         header_route = message.get(ROUTE_HEADER)
         subject = message.get("Subject", "")
-        if header_token == token and (header_route in (None, route_id)):
-            return True
         decoded_subject = str(email.header.make_header(email.header.decode_header(subject)))
-        return token in decoded_subject and header_token == token
+        if header_token is not None:
+            return header_token == token and header_route in (None, route_id)
+        if header_route not in (None, route_id):
+            return False
+        return decoded_subject == f"[mailflow-monitor] route={route_id} token={token}"
 
     def _delete_message(
         self,
         connection: imaplib.IMAP4 | imaplib.IMAP4_SSL,
         uid: bytes,
     ) -> None:
-        status, _ = connection.uid("STORE", uid, "+FLAGS.SILENT", r"(\Deleted)")
+        status, _ = connection.uid(
+            "STORE",
+            uid.decode("ascii"),
+            "+FLAGS.SILENT",
+            r"(\Deleted)",
+        )
         if status != "OK":
             raise ImapError(f"IMAP: cannot mark uid={uid.decode(errors='ignore')} as deleted")
         connection.expunge()
