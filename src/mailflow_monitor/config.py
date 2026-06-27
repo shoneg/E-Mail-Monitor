@@ -25,11 +25,12 @@ from .models import (
 )
 
 ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def load_config(path: str | Path = "config.toml") -> AppConfig:
-    """Read a TOML file, expand environment variables, and validate references."""
+    """Read a TOML file, load its adjacent .env file, and validate references."""
 
     config_path = Path(path).expanduser().resolve()
     try:
@@ -44,25 +45,81 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
 
     if not isinstance(data, dict):
         raise ConfigError("config: top-level value must be a TOML table")
-    expanded_data = _expand_environment_values(data)
+    environment = {**_load_dotenv(config_path.with_name(".env")), **os.environ}
+    expanded_data = _expand_environment_values(data, environment)
     return _parse_app_config(expanded_data, config_path)
 
 
-def _expand_environment_values(value: Any) -> Any:
+def _load_dotenv(path: Path) -> dict[str, str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ConfigError(f"config: cannot read environment file: {path}") from exc
+
+    values: dict[str, str] = {}
+    for line_number, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export") and stripped[6:7].isspace():
+            stripped = stripped[6:].lstrip()
+
+        name, separator, raw_value = stripped.partition("=")
+        name = name.strip()
+        if not separator or ENV_NAME_PATTERN.fullmatch(name) is None:
+            raise ConfigError(f"config: invalid .env entry at {path}:{line_number}")
+
+        values[name] = _parse_dotenv_value(raw_value, path, line_number)
+    return values
+
+
+def _parse_dotenv_value(raw_value: str, path: Path, line_number: int) -> str:
+    value = raw_value.strip()
+    if not value:
+        return ""
+    if value[0] not in {'"', "'"}:
+        comment = re.search(r"\s+#", value)
+        return value[: comment.start()].rstrip() if comment else value
+
+    quote = value[0]
+    parsed: list[str] = []
+    escaped = False
+    escape_sequences = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
+    for index, character in enumerate(value[1:], start=1):
+        if quote == '"' and escaped:
+            parsed.append(escape_sequences.get(character, f"\\{character}"))
+            escaped = False
+            continue
+        if quote == '"' and character == "\\":
+            escaped = True
+            continue
+        if character == quote:
+            trailing = value[index + 1 :].strip()
+            if trailing and not trailing.startswith("#"):
+                break
+            return "".join(parsed)
+        parsed.append(character)
+
+    raise ConfigError(f"config: invalid quoted .env value at {path}:{line_number}")
+
+
+def _expand_environment_values(value: Any, environment: Mapping[str, str]) -> Any:
     if isinstance(value, str):
-        return _expand_environment_string(value)
+        return _expand_environment_string(value, environment)
     if isinstance(value, list):
-        return [_expand_environment_values(item) for item in value]
+        return [_expand_environment_values(item, environment) for item in value]
     if isinstance(value, dict):
-        return {key: _expand_environment_values(item) for key, item in value.items()}
+        return {key: _expand_environment_values(item, environment) for key, item in value.items()}
     return value
 
 
-def _expand_environment_string(text: str) -> str:
+def _expand_environment_string(text: str, environment: Mapping[str, str]) -> str:
     def replace(match: re.Match[str]) -> str:
         name = match.group(1)
         try:
-            return os.environ[name]
+            return environment[name]
         except KeyError as exc:
             raise ConfigError(
                 f"config: referenced environment variable ${name} is not set"

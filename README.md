@@ -63,7 +63,11 @@ cp .env.example .env
 
 `config.toml`, `.env`, `var/`, and local logs are ignored by Git.
 
-Passwords can be stored directly in `config.toml`, but environment variables are safer. Any string value can reference `${VARIABLE_NAME}`. If a referenced variable is missing, validation fails with a clear error.
+Passwords can be stored directly in `config.toml`, but environment variables are safer.
+The program automatically loads an optional `.env` file from the same directory as
+the selected `config.toml`. Variables already present in the process environment take
+precedence. Any string value can reference `${VARIABLE_NAME}`. If a referenced
+variable is missing, validation fails with a clear error.
 
 Relative paths such as `state_file`, `lock_file`, and `ca_file` are resolved relative to the configuration file location.
 
@@ -180,7 +184,9 @@ cp deploy/systemd/mailflow-monitor.service ~/.config/systemd/user/
 cp deploy/systemd/mailflow-monitor.timer ~/.config/systemd/user/
 ```
 
-Place `config.toml` and optional `.env` in `~/.config/mailflow-monitor/`, or edit the service file paths.
+Place `config.toml` and optional `.env` in `~/.config/mailflow-monitor/`, or edit the
+service file paths. The service's `EnvironmentFile` remains compatible with automatic
+`.env` loading.
 
 Enable and inspect the timer:
 
@@ -199,7 +205,7 @@ separate configuration setting.
 ## Cron Alternative
 
 ```cron
-*/5 * * * * cd /home/you/.config/mailflow-monitor && . .env && /home/you/.local/bin/mailflow-monitor check --config config.toml
+*/5 * * * * cd /home/you/.config/mailflow-monitor && /home/you/.local/bin/mailflow-monitor check --config config.toml
 ```
 
 ## Logging and Troubleshooting

@@ -129,6 +129,88 @@ expect_at = ["recipient"]
         load_config(path)
 
 
+def test_loads_environment_from_dotenv_next_to_config(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[monitor]
+
+[addresses.sender]
+address = "sender@example.net"
+[addresses.sender.smtp]
+host = "smtp.example.net"
+port = 587
+tls_mode = "starttls"
+username = "sender@example.net"
+password = "${DOTENV_PASSWORD}"
+
+[addresses.recipient]
+address = "recipient@example.net"
+
+[[routes]]
+id = "route"
+from = "sender"
+[[routes.deliveries]]
+to = "recipient"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "DOTENV_PASSWORD='secret with # and $ characters'\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.addresses["sender"].smtp.password == "secret with # and $ characters"
+
+
+def test_process_environment_overrides_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[monitor]
+
+[addresses.sender]
+address = "sender@example.net"
+[addresses.sender.smtp]
+host = "smtp.example.net"
+port = 587
+tls_mode = "starttls"
+username = "sender@example.net"
+password = "${DOTENV_PASSWORD}"
+
+[addresses.recipient]
+address = "recipient@example.net"
+
+[[routes]]
+id = "route"
+from = "sender"
+[[routes.deliveries]]
+to = "recipient"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("DOTENV_PASSWORD=from-file\n", encoding="utf-8")
+    monkeypatch.setenv("DOTENV_PASSWORD", "from-process")
+
+    config = load_config(path)
+
+    assert config.addresses["sender"].smtp.password == "from-process"
+
+
+def test_invalid_dotenv_entry_fails_with_line_number(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("[monitor]\n[addresses]\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("# comment\nINVALID ENTRY\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=r"\.env:2"):
+        load_config(path)
+
+
 def test_environment_expansion_happens_after_toml_parse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
