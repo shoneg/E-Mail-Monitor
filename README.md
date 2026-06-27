@@ -37,7 +37,7 @@ the forwarded message in the external destination mailbox. For send-only routes,
 - SMTP access for senders and IMAP access for routes that verify delivery
 - Dedicated test accounts are strongly recommended
 
-## Installation
+## Development Installation
 
 ```bash
 python3.11 -m venv .venv
@@ -46,11 +46,17 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-For a production user install:
+For a production installation used by the supplied systemd user service, install the
+package into a virtual environment at a stable path:
 
 ```bash
-python -m pip install .
+python3.11 -m venv ~/.local/share/mailflow-monitor/venv
+~/.local/share/mailflow-monitor/venv/bin/python -m pip install .
 ```
+
+The service invokes the executable inside this virtual environment directly.
+Activating a virtual environment is only a shell convenience and is neither needed
+nor available in a systemd unit.
 
 ## Configuration
 
@@ -185,8 +191,8 @@ cp deploy/systemd/mailflow-monitor.timer ~/.config/systemd/user/
 ```
 
 Place `config.toml` and optional `.env` in `~/.config/mailflow-monitor/`, or edit the
-service file paths. The service's `EnvironmentFile` remains compatible with automatic
-`.env` loading.
+service file paths. The program loads `.env` automatically from the directory
+containing `config.toml`.
 
 Enable and inspect the timer:
 
@@ -205,7 +211,7 @@ separate configuration setting.
 ## Cron Alternative
 
 ```cron
-*/5 * * * * cd /home/you/.config/mailflow-monitor && /home/you/.local/bin/mailflow-monitor check --config config.toml
+*/5 * * * * cd /home/you/.config/mailflow-monitor && /home/you/.local/share/mailflow-monitor/venv/bin/mailflow-monitor check --config config.toml
 ```
 
 ## Logging and Troubleshooting
