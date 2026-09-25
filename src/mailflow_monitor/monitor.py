@@ -12,6 +12,7 @@ from datetime import datetime
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
 
+from .cleanup import CleanupManager
 from .imap_client import ImapClient
 from .models import (
     AppConfig,
@@ -23,10 +24,11 @@ from .models import (
     RouteConfig,
     RouteRunResult,
     SmtpError,
+    TransientImapError,
 )
 from .notifications import NotificationManager
 from .smtp_client import SmtpClient
-from .state import FileLock, MonitorState, RouteState, StateStore, format_dt, utc_now
+from .state import CleanupTask, FileLock, MonitorState, RouteState, StateStore, format_dt, utc_now
 
 LOGGER = logging.getLogger(__name__)
 
@@ -73,6 +75,9 @@ class MailflowMonitor:
             )
             results = self._run_routes(due_routes)
             self._update_state_from_results(state, results)
+            for result in results:
+                for address_id, token in result.cleanup_requests:
+                    state.cleanup_pending.append(CleanupTask(address_id, result.route_id, token))
 
             run_success = all(
                 state.routes.get(route_id) is not None
@@ -97,6 +102,15 @@ class MailflowMonitor:
                     notification_failed = True
                     LOGGER.error("Notification delivery failed: %s", exc)
 
+            # Persist verified deliveries and pending cleanup before any further network I/O.
+            self.state_store.save(state)
+            CleanupManager(self.config, self.imap_client_factory, self.now_factory).process(state)
+            try:
+                notifications = NotificationManager(self.config, self.smtp_client_factory)
+                notifications.maybe_send_cleanup_warning(state, self.now_factory())
+            except Exception as exc:
+                notification_failed = True
+                LOGGER.error("Cleanup notification delivery failed: %s", exc)
             self.state_store.save(state)
             return CheckResult(
                 success=run_success,
@@ -142,6 +156,7 @@ class MailflowMonitor:
         delivery_tokens = tuple(uuid.uuid4().hex for _ in route.deliveries)
         token = delivery_tokens[0]
         delivery_attempts = tuple(zip(route.deliveries, delivery_tokens, strict=True))
+        cleanup_requests: list[tuple[str, str]] = []
         direction = self._route_direction(route)
         LOGGER.info("Route started: route=%s direction=%s", route.id, direction)
         try:
@@ -154,7 +169,7 @@ class MailflowMonitor:
                     len(route.deliveries),
                     route.timeout_seconds,
                 )
-                self._wait_for_expected_mailboxes(route, delivery_attempts)
+                self._wait_for_expected_mailboxes(route, delivery_attempts, cleanup_requests)
                 outcome = "succeeded"
             else:
                 outcome = "sent (delivery verification disabled)"
@@ -167,6 +182,7 @@ class MailflowMonitor:
                 finished_at=self.now_factory(),
                 message=f"route={route.id} direction={direction} {outcome}",
                 delivery_tokens=delivery_tokens,
+                cleanup_requests=tuple(cleanup_requests),
             )
         except (SmtpError, ImapError, DeliveryTimeoutError) as exc:
             LOGGER.warning("Route failed: route=%s direction=%s error=%s", route.id, direction, exc)
@@ -179,6 +195,7 @@ class MailflowMonitor:
                 message=f"route={route.id} direction={direction} failed: {exc}",
                 error_class=exc.__class__.__name__,
                 delivery_tokens=delivery_tokens,
+                cleanup_requests=tuple(cleanup_requests),
             )
         except Exception as exc:
             LOGGER.exception("Unexpected route failure: route=%s direction=%s", route.id, direction)
@@ -191,6 +208,7 @@ class MailflowMonitor:
                 message=f"route={route.id} direction={direction} failed: {exc.__class__.__name__}",
                 error_class=exc.__class__.__name__,
                 delivery_tokens=delivery_tokens,
+                cleanup_requests=tuple(cleanup_requests),
             )
 
     def _send_test_message(
@@ -223,6 +241,7 @@ class MailflowMonitor:
         self,
         route: RouteConfig,
         delivery_attempts: tuple[tuple[DeliveryConfig, str], ...],
+        cleanup_requests: list[tuple[str, str]],
     ) -> None:
         expectations = tuple(
             (delivery_index, address_id, token)
@@ -233,6 +252,7 @@ class MailflowMonitor:
             (delivery_index, address_id) for delivery_index, address_id, _ in expectations
         }
         found: set[tuple[int, str]] = set()
+        last_transient_errors: dict[tuple[int, str], str] = {}
         deadline = self.monotonic() + route.timeout_seconds
         while True:
             for delivery_index, address_id, token in expectations:
@@ -249,15 +269,27 @@ class MailflowMonitor:
                     has_token = client.find_token(
                         token,
                         route.id,
-                        cleanup=self.config.monitor.cleanup_received_test_messages,
+                        cleanup=False,
                     )
+                except TransientImapError as exc:
+                    last_transient_errors[expectation_id] = str(exc)
+                    LOGGER.info(
+                        "Temporary IMAP failure: route=%s account=%s; retrying: %s",
+                        route.id,
+                        address_id,
+                        exc,
+                    )
+                    continue
                 except ImapError as exc:
                     raise ImapError(
                         f"route={route.id} delivery={delivery_index} account={address_id} "
                         f"class=ImapError: {exc}"
                     ) from exc
+                last_transient_errors.pop(expectation_id, None)
                 if has_token:
                     found.add(expectation_id)
+                    if self.config.monitor.cleanup_received_test_messages:
+                        cleanup_requests.append((address_id, token))
             if found == expected_ids:
                 return
             now = self.monotonic()
@@ -266,6 +298,12 @@ class MailflowMonitor:
                     f"delivery={delivery_index} account={address_id}"
                     for delivery_index, address_id in sorted(expected_ids - found)
                 )
+                if last_transient_errors:
+                    raise ImapError(
+                        f"route={route.id} missing={missing}: delivery could not be verified "
+                        f"within {route.timeout_seconds}s; last IMAP errors: "
+                        + "; ".join(last_transient_errors.values())
+                    )
                 raise DeliveryTimeoutError(
                     f"route={route.id} missing={missing} class=DeliveryTimeoutError "
                     f"token was not found within {route.timeout_seconds}s"

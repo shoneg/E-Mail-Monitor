@@ -194,7 +194,24 @@ def _parse_monitor(
         if LOG_LEVEL_ENV_VAR in environment:
             source = LOG_LEVEL_ENV_VAR
         raise ConfigError(f"{source}: {exc}") from exc
+    cleanup_settings = {
+        key: _get_positive_int(data, key, f"monitor.{key}", default)
+        for key, default in (
+            ("cleanup_retry_count", 10),
+            ("cleanup_retry_interval_seconds", 60),
+            ("cleanup_failure_threshold", 10),
+            ("cleanup_failure_window", 15),
+        )
+    }
+    if cleanup_settings["cleanup_failure_threshold"] > cleanup_settings["cleanup_failure_window"]:
+        raise ConfigError(
+            "monitor.cleanup_failure_threshold: must not exceed cleanup_failure_window"
+        )
     return MonitorConfig(
+        cleanup_retry_count=cleanup_settings["cleanup_retry_count"],
+        cleanup_retry_interval_seconds=cleanup_settings["cleanup_retry_interval_seconds"],
+        cleanup_failure_threshold=cleanup_settings["cleanup_failure_threshold"],
+        cleanup_failure_window=cleanup_settings["cleanup_failure_window"],
         state_file=str(state_file),
         lock_file=str(lock_file),
         log_level=log_level,
@@ -597,7 +614,7 @@ def _get_positive_int(
             return default
         raise ConfigError(f"{path}: is required")
     value = data[key]
-    if not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ConfigError(f"{path}: must be a positive integer")
     return value
 

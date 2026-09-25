@@ -212,7 +212,7 @@ systemctl --user status mailflow-monitor.timer
 journalctl --user -u mailflow-monitor.service
 ```
 
-The example timer wakes the program every five minutes. A route is only sent when its
+The example timer wakes the program every minute. A route is only sent when its
 configured `send_interval_seconds` has elapsed; therefore the timer should run at least
 as often as the shortest desired route interval. Aliveness frequency remains a
 separate configuration setting.
@@ -249,3 +249,65 @@ deleted. Servers supporting UIDPLUS or IMAP4rev2 are asked to expunge only that 
 servers, the message remains marked as deleted for later cleanup so unrelated deleted messages are
 never expunged by the monitor. Leave cleanup disabled until you have verified routing and mailbox
 selection.
+
+
+### Cleanup retries and warnings
+
+With `cleanup_received_test_messages = true`, finding the exact test token is a
+successful delivery even if deleting the message fails. Cleanup is processed
+separately after delivery checks and their notifications. Pending work and per-account
+outcomes are saved in the state file and survive process restarts.
+
+The following optional settings belong in `[monitor]`:
+
+```toml
+cleanup_retry_count = 10
+cleanup_retry_interval_seconds = 60
+cleanup_failure_threshold = 10
+cleanup_failure_window = 15
+```
+
+There is one initial attempt and up to `cleanup_retry_count` additional attempts.
+Each pending message is attempted at most once per invocation, no earlier than
+`cleanup_retry_interval_seconds` after the preceding failed attempt finishes.
+There is no sleeping retry loop that holds the process open for ten minutes.
+Run the timer every minute for approximately one-minute retries; a five-minute
+timer also works but retries less frequently. Long delivery checks or network
+operations can delay retries. Route send intervals still control test mail volume.
+Updating the repository timer does not update an already installed timer: copy the
+unit again, run `systemctl --user daemon-reload`, and restart the timer.
+
+Every attempt re-searches and verifies the exact token before deleting anything.
+A message already absent from the configured mailboxes needs no further cleanup.
+After the last failed attempt, the monitor leaves the message alone. A message
+may already carry the deleted flag if marking succeeded but expunging failed.
+Disabling cleanup pauses existing queued work; removing an IMAP account discards
+its queued work without accessing the mailbox.
+
+The window counts the latest **completed cleanup outcomes per IMAP account**,
+not attempts or pending jobs. A warning starts once the failure threshold is
+reached; a full window is not required. For 20 failures among the last 20 outcomes,
+set both threshold and window to 20. All four settings must be positive integers,
+and the threshold must not exceed the window.
+
+Warnings use the sender and recipients from `[notifications.alerts]` and require
+alerts to be enabled. They have the subject `Cleanup warning` and their own
+cooldown using `repeat_after_seconds`. While the threshold remains exceeded,
+warnings may repeat after that cooldown. They do not open delivery incidents,
+trigger recovery messages, or change delivery health. Individual cleanup failures
+are logged at INFO, without sending an email.
+
+### IMAP timeouts
+
+A route's `timeout_seconds` (or `default_timeout_seconds`) is the delivery waiting
+period after SMTP sends finish. IMAP connections use a separate 30-second socket
+timeout for individual blocking network operations. Until the delivery deadline,
+network timeouts, refused connections and aborted IMAP connections are retried
+using the route's `poll_interval_seconds`, without sending another test message.
+Permanent protocol/login errors still fail immediately. If verification remains
+unavailable at the deadline, the failure identifies IMAP access rather than
+claiming that non-delivery was proven. A successful query with no matching mail
+continues to use `DeliveryTimeoutError` at the deadline.
+
+The delivery deadline is checked between polling passes, so in-progress network
+operations may take a pass beyond it; it is not a hard process runtime limit.

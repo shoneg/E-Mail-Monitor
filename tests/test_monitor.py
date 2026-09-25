@@ -375,3 +375,123 @@ def _sequence(*values: float):
 
 def _sent_test_messages() -> list[dict[str, object]]:
     return [item for item in FakeSmtpClient.sent if item["message"].get("X-Mailflow-Monitor-Token")]
+
+
+def test_transient_imap_failure_retries_same_token_without_resending(loaded_example_config) -> None:
+    from mailflow_monitor.models import TransientImapError
+
+    class FlakyImap(FakeImapClient):
+        tokens: list[str] = []
+
+        def find_token(self, token, route_id, cleanup=False):
+            self.tokens.append(token)
+            if len(self.tokens) == 1:
+                raise TransientImapError("network timeout")
+            return True
+
+    sleeps = []
+    monitor = MailflowMonitor(
+        loaded_example_config,
+        FakeSmtpClient,
+        FlakyImap,
+        monotonic=_sequence(0, 30),
+        sleep=sleeps.append,
+    )
+    result = monitor.check(route_ids=["external-to-stalwart"])
+    assert result.success
+    assert len(_sent_test_messages()) == 1
+    assert len(FlakyImap.tokens) == 2
+    assert len(set(FlakyImap.tokens)) == 1
+    assert sleeps == [30]
+
+
+def test_persistent_network_failure_reports_unverified_delivery(loaded_example_config) -> None:
+    from mailflow_monitor.models import TransientImapError
+
+    class OfflineImap(FakeImapClient):
+        def find_token(self, token, route_id, cleanup=False):
+            raise TransientImapError("network timeout")
+
+    monitor = MailflowMonitor(
+        loaded_example_config,
+        FakeSmtpClient,
+        OfflineImap,
+        monotonic=_sequence(0, 30, 901),
+        sleep=lambda seconds: None,
+    )
+    result = monitor.check(route_ids=["external-to-stalwart"])
+    assert not result.success
+    assert result.route_results[0].error_class == "ImapError"
+    assert "could not be verified" in result.route_results[0].message
+
+
+def test_cleanup_failure_keeps_delivery_healthy_and_retries_on_skipped_runs(
+    loaded_example_config,
+    fixed_now,
+) -> None:
+    config = replace(
+        loaded_example_config,
+        routes=(loaded_example_config.routes[0],),
+        monitor=replace(loaded_example_config.monitor, cleanup_received_test_messages=True),
+    )
+
+    class CleanupFails(FakeImapClient):
+        cleanups = 0
+
+        def find_token(self, token, route_id, cleanup=False):
+            if cleanup:
+                type(self).cleanups += 1
+                raise ImapError("cannot mark message deleted")
+            return True
+
+    monitor = MailflowMonitor(config, FakeSmtpClient, CleanupFails, now_factory=lambda: fixed_now)
+    assert monitor.check().success
+    state = monitor.state_store.load()
+    assert state.incident_started_at is None
+    assert state.cleanup_pending[0].attempts == 1
+    token = state.cleanup_pending[0].token
+    assert not any("failure" in item["message"]["Subject"] for item in FakeSmtpClient.sent)
+
+    # Simulate a fresh process, with no new delivery due yet.
+    restarted = MailflowMonitor(
+        config,
+        FakeSmtpClient,
+        CleanupFails,
+        now_factory=lambda: fixed_now + timedelta(seconds=60),
+    )
+    result = restarted.check()
+    assert result.success and result.route_results == ()
+    assert len(_sent_test_messages()) == 1
+    assert CleanupFails.cleanups == 2
+    assert restarted.state_store.load().cleanup_pending[0].token == token
+    assert restarted.state_store.load().cleanup_pending[0].attempts == 2
+
+
+def test_verified_message_is_cleaned_even_if_another_delivery_times_out(loaded_example_config):
+    route = loaded_example_config.routes[0]
+    route = replace(route, deliveries=(route.deliveries[0], route.deliveries[0]))
+    config = replace(
+        loaded_example_config,
+        routes=(route,),
+        monitor=replace(loaded_example_config.monitor, cleanup_received_test_messages=True),
+    )
+
+    class FirstArrives(FakeImapClient):
+        cleaned = []
+
+        def find_token(self, token, route_id, cleanup=False):
+            if cleanup:
+                self.cleaned.append(token)
+            return token == _sent_test_messages()[0]["message"]["X-Mailflow-Monitor-Token"]
+
+    monitor = MailflowMonitor(
+        config,
+        FakeSmtpClient,
+        FirstArrives,
+        monotonic=_sequence(0, 901),
+        sleep=lambda seconds: None,
+    )
+    result = monitor.check()
+    assert not result.success
+    assert FirstArrives.cleaned == [result.route_results[0].delivery_tokens[0]]
+    assert monitor.state_store.load().cleanup_history == {"stalwart_recipient": [True]}

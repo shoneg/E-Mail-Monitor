@@ -75,3 +75,56 @@ def test_aliveness_respects_interval(loaded_example_config, fixed_now) -> None:
     ]
     assert len(aliveness) == 1
     assert state.last_aliveness_at == fixed_now
+
+
+def test_cleanup_warning_threshold_per_account_and_independent_cooldown(
+    loaded_example_config,
+    fixed_now,
+) -> None:
+    from dataclasses import replace
+
+    config = replace(
+        loaded_example_config,
+        monitor=replace(loaded_example_config.monitor, cleanup_received_test_messages=True),
+    )
+    state = MonitorState(
+        last_alert_at=fixed_now,
+        cleanup_history={"stalwart_recipient": [False] * 9, "external_recipient": [False] * 9},
+    )
+    manager = NotificationManager(config, RecordingSmtpClient)
+    manager.maybe_send_cleanup_warning(state, fixed_now)
+    assert RecordingSmtpClient.sent == []
+    state.cleanup_history["stalwart_recipient"].append(False)
+    manager.maybe_send_cleanup_warning(state, fixed_now)
+    assert len(RecordingSmtpClient.sent) == 1
+    assert "Cleanup warning" in RecordingSmtpClient.sent[0]["subject"]
+    assert "10 of 10" in RecordingSmtpClient.sent[0]["body"]
+    assert state.incident_started_at is None
+    assert state.last_alert_at == fixed_now
+    manager.maybe_send_cleanup_warning(state, fixed_now + timedelta(seconds=60))
+    assert len(RecordingSmtpClient.sent) == 1
+    state.cleanup_history["stalwart_recipient"] = [False] * 9 + [True] * 6
+    manager.maybe_send_cleanup_warning(state, fixed_now + timedelta(days=1))
+    assert len(RecordingSmtpClient.sent) == 1
+
+
+def test_failed_cleanup_warning_can_be_retried(loaded_example_config, fixed_now) -> None:
+    from dataclasses import replace
+
+    import pytest
+
+    from mailflow_monitor.models import NotificationError
+
+    config = replace(
+        loaded_example_config,
+        monitor=replace(loaded_example_config.monitor, cleanup_received_test_messages=True),
+    )
+    state = MonitorState(cleanup_history={"stalwart_recipient": [False] * 10})
+    manager = NotificationManager(config, RecordingSmtpClient)
+    RecordingSmtpClient.fail = True
+    with pytest.raises(NotificationError):
+        manager.maybe_send_cleanup_warning(state, fixed_now)
+    assert state.last_cleanup_alert_at is None
+    RecordingSmtpClient.fail = False
+    manager.maybe_send_cleanup_warning(state, fixed_now)
+    assert state.last_cleanup_alert_at == fixed_now

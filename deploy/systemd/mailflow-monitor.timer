@@ -1,10 +1,10 @@
 [Unit]
-Description=Run Mailflow Monitor every five minutes
+Description=Run Mailflow Monitor every minute
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
-AccuracySec=30s
+OnUnitActiveSec=1min
+AccuracySec=5s
 Unit=mailflow-monitor.service
 
 [Install]

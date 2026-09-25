@@ -194,3 +194,32 @@ def test_imap_cleanup_never_globally_expunges_without_uidplus() -> None:
     assert connection.commands == [
         ("STORE", "42", "+FLAGS.SILENT", r"(\Deleted)"),
     ]
+
+
+def test_failed_search_is_not_mistaken_for_already_deleted_message():
+    import pytest
+
+    from mailflow_monitor.models import ImapError
+
+    class BrokenSearch:
+        def uid(self, *args):
+            return "NO", [b"search temporarily unavailable"]
+
+    client = ImapClient(ImapConfig("host", 993, TlsMode.SSL, "user", "password"))
+    with pytest.raises(ImapError, match="candidate search failed"):
+        client._search_candidates(BrokenSearch(), "token", "INBOX")
+
+
+def test_socket_timeouts_are_classified_as_retryable(monkeypatch):
+    import pytest
+
+    from mailflow_monitor.models import TransientImapError
+
+    client = ImapClient(ImapConfig("host", 993, TlsMode.SSL, "user", "password"))
+
+    def timeout():
+        raise TimeoutError("timeout")
+
+    monkeypatch.setattr(client, "_connect", timeout)
+    with pytest.raises(TransientImapError):
+        client.find_token("token", "route")

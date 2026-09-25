@@ -64,6 +64,36 @@ class RouteState:
 
 
 @dataclass
+class CleanupTask:
+    """A verified message awaiting best-effort cleanup; no credentials or reusable UIDs."""
+
+    address_id: str
+    route_id: str
+    token: str
+    attempts: int = 0
+    next_attempt_at: datetime | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "address_id": self.address_id,
+            "route_id": self.route_id,
+            "token": self.token,
+            "attempts": self.attempts,
+            "next_attempt_at": format_dt(self.next_attempt_at),
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> CleanupTask:
+        return cls(
+            address_id=data["address_id"],
+            route_id=data["route_id"],
+            token=data["token"],
+            attempts=data.get("attempts", 0),
+            next_attempt_at=parse_dt(data.get("next_attempt_at")),
+        )
+
+
+@dataclass
 class MonitorState:
     """Persisted monitor state without credentials."""
 
@@ -75,6 +105,9 @@ class MonitorState:
     last_aliveness_at: datetime | None = None
     last_recovery_at: datetime | None = None
     routes: dict[str, RouteState] = field(default_factory=dict)
+    cleanup_pending: list[CleanupTask] = field(default_factory=list)
+    cleanup_history: dict[str, list[bool]] = field(default_factory=dict)
+    last_cleanup_alert_at: datetime | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -86,6 +119,9 @@ class MonitorState:
             "last_aliveness_at": format_dt(self.last_aliveness_at),
             "last_recovery_at": format_dt(self.last_recovery_at),
             "routes": {key: value.to_json() for key, value in self.routes.items()},
+            "cleanup_pending": [task.to_json() for task in self.cleanup_pending],
+            "cleanup_history": self.cleanup_history,
+            "last_cleanup_alert_at": format_dt(self.last_cleanup_alert_at),
         }
 
     @classmethod
@@ -107,6 +143,11 @@ class MonitorState:
             last_aliveness_at=parse_dt(data.get("last_aliveness_at")),
             last_recovery_at=parse_dt(data.get("last_recovery_at")),
             routes=routes,
+            cleanup_pending=[
+                CleanupTask.from_json(item) for item in data.get("cleanup_pending", [])
+            ],
+            cleanup_history=data.get("cleanup_history", {}),
+            last_cleanup_alert_at=parse_dt(data.get("last_cleanup_alert_at")),
         )
 
 

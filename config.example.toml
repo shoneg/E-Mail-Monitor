@@ -14,6 +14,14 @@ default_send_interval_seconds = 3600
 # Disabled by default. When enabled, only messages with the exact current token
 # are marked deleted after a successful match.
 cleanup_received_test_messages = false
+# One initial cleanup attempt plus this many retries, persisted across runs.
+cleanup_retry_count = 10
+# Minimum spacing; retries run on the next monitor invocation after this delay.
+cleanup_retry_interval_seconds = 60
+# Warn per IMAP account if at least 10 of the last 15 completed cleanups failed.
+# Warnings use notifications.alerts sender/recipients and an independent cooldown.
+cleanup_failure_threshold = 10
+cleanup_failure_window = 15
 
 [addresses.stalwart_sender]
 address = "monitor@stalwart.example"

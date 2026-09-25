@@ -5,11 +5,10 @@ from __future__ import annotations
 import email
 import imaplib
 import logging
-import ssl
 from email import policy
 from email.parser import BytesParser
 
-from .models import ImapConfig, ImapError, TlsMode
+from .models import ImapConfig, ImapError, TlsMode, TransientImapError
 from .smtp_client import create_tls_context
 
 LOGGER = logging.getLogger(__name__)
@@ -35,7 +34,12 @@ class ImapClient:
                 if self._find_in_mailbox(connection, mailbox, token, route_id, cleanup):
                     return True
             return False
-        except (imaplib.IMAP4.error, OSError, ssl.SSLError) as exc:
+        except (imaplib.IMAP4.abort, OSError) as exc:
+            raise TransientImapError(
+                f"IMAP: connection failed for host={self.config.host} port={self.config.port}: "
+                f"{exc.__class__.__name__}"
+            ) from exc
+        except imaplib.IMAP4.error as exc:
             raise ImapError(
                 f"IMAP: search failed for host={self.config.host} port={self.config.port}: "
                 f"{exc.__class__.__name__}"
@@ -98,7 +102,12 @@ class ImapClient:
         ):
             # None intentionally omits CHARSET; every search value here is ASCII.
             status, data = connection.uid("SEARCH", None, *criteria)  # type: ignore[arg-type]
-            if status == "OK" and data:
+            if status != "OK":
+                raise ImapError(
+                    f"IMAP: candidate search failed for host={self.config.host} "
+                    f"mailbox={mailbox} criterion={_describe_search_criteria(criteria)}"
+                )
+            if data:
                 matches = _split_uid_response(data[0])
                 LOGGER.debug(
                     "IMAP candidate search: host=%s mailbox=%s criterion=%s matches=%d",

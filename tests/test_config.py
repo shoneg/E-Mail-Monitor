@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -399,3 +400,40 @@ expect_at = ["recipient"]
 
     config = load_config(path)
     assert config.addresses["sender"].smtp.tls_mode is TlsMode.PLAIN
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("cleanup_retry_count", 0),
+        ("cleanup_retry_interval_seconds", -1),
+        ("cleanup_failure_threshold", 16),
+        ("cleanup_failure_window", 0),
+        ("cleanup_retry_count", True),
+    ],
+)
+def test_cleanup_settings_are_validated(loaded_example_config, key, value):
+    path = Path(loaded_example_config.config_path)
+    text = path.read_text()
+    literal = str(value).lower()
+    text = re.sub(rf"^{key} = .*", f"{key} = {literal}", text, flags=re.MULTILINE)
+    path.write_text(text)
+    with pytest.raises(ConfigError, match="cleanup_"):
+        load_config(path)
+
+
+def test_cleanup_settings_can_be_overridden(loaded_example_config):
+    path = Path(loaded_example_config.config_path)
+    text = path.read_text()
+    for key, value in {
+        "cleanup_retry_count": 3,
+        "cleanup_retry_interval_seconds": 120,
+        "cleanup_failure_threshold": 20,
+        "cleanup_failure_window": 20,
+    }.items():
+        text = re.sub(rf"^{key} = .*", f"{key} = {value}", text, flags=re.MULTILINE)
+    path.write_text(text)
+    settings = load_config(path).monitor
+    assert settings.cleanup_retry_count == 3
+    assert settings.cleanup_retry_interval_seconds == 120
+    assert settings.cleanup_failure_threshold == settings.cleanup_failure_window == 20

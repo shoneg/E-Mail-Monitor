@@ -49,6 +49,42 @@ class NotificationManager:
             state.incident_details = failure_details
         self._maybe_send_alert(state, failure_details, now)
 
+    def maybe_send_cleanup_warning(self, state: MonitorState, now: datetime) -> None:
+        """Warn about repeated exhausted cleanups without opening a delivery incident."""
+        alerts = self.config.notifications.alerts
+        settings = self.config.monitor
+        if not alerts.enabled or not settings.cleanup_received_test_messages:
+            return
+        if (
+            state.last_cleanup_alert_at is not None
+            and (now - state.last_cleanup_alert_at).total_seconds() < alerts.repeat_after_seconds
+        ):
+            return
+        details = []
+        for address_id, history in state.cleanup_history.items():
+            account = self.config.addresses.get(address_id)
+            if account is None or account.imap is None:
+                continue
+            recent = history[-settings.cleanup_failure_window :]
+            failures = recent.count(False)
+            if failures >= settings.cleanup_failure_threshold:
+                details.append(
+                    f"- {address_id}: {failures} of {len(recent)} completed cleanups failed"
+                )
+        if not details:
+            return
+        self._send(
+            alerts.sender,
+            alerts.recipients,
+            "[mailflow-monitor] Cleanup warning",
+            "Repeated cleanup attempts were exhausted for previously verified test messages.\n"
+            "These cleanup failures do not indicate failed delivery.\n"
+            "No further deletion attempts will be made for the affected messages; "
+            "they may remain in the mailbox or be marked deleted.\n\n" + "\n".join(details),
+            now,
+        )
+        state.last_cleanup_alert_at = now
+
     def _maybe_send_alert(self, state: MonitorState, details: str, now: datetime) -> None:
         alerts = self.config.notifications.alerts
         if not alerts.enabled:
@@ -128,4 +164,3 @@ class NotificationManager:
             raise NotificationError(
                 f"notification delivery failed via sender '{sender_id}': {exc.__class__.__name__}"
             ) from exc
-

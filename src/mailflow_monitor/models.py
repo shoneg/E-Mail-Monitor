@@ -23,6 +23,10 @@ class ImapError(MailflowError):
     """IMAP access or message search failed."""
 
 
+class TransientImapError(ImapError):
+    """An IMAP network failure that can be retried within the delivery deadline."""
+
+
 class DeliveryTimeoutError(MailflowError):
     """An expected test message was not found before the timeout expired."""
 
@@ -108,6 +112,10 @@ class MonitorConfig:
     default_poll_interval_seconds: int
     cleanup_received_test_messages: bool = False
     default_send_interval_seconds: int | None = None
+    cleanup_retry_count: int = 10
+    cleanup_retry_interval_seconds: int = 60
+    cleanup_failure_threshold: int = 10
+    cleanup_failure_window: int = 15
 
 
 @dataclass(frozen=True)
@@ -171,6 +179,7 @@ class RouteRunResult:
     message: str
     error_class: str | None = None
     delivery_tokens: tuple[str, ...] = ()
+    cleanup_requests: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
