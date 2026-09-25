@@ -45,6 +45,20 @@ class MailflowMonitor:
         monotonic: Callable[[], float] = time.monotonic,
         now_factory: Callable[[], datetime] = utc_now,
     ) -> None:
+        """Configure monitoring dependencies without starting network or file operations.
+
+        Args:
+            config: Validated application settings.
+            smtp_client_factory: SMTP client constructor shared by checks and notifications.
+            imap_client_factory: IMAP client constructor used for verification and cleanup.
+            sleep: Callable accepting seconds to wait between polling passes.
+            monotonic: Clock returning monotonic seconds for delivery deadlines.
+            now_factory: Clock returning timezone-aware times for persisted state and message
+                dates.
+
+        Returns:
+            None.
+        """
         self.config = config
         self.smtp_client_factory = smtp_client_factory
         self.imap_client_factory = imap_client_factory
@@ -58,7 +72,25 @@ class MailflowMonitor:
         route_ids: Iterable[str] | None = None,
         force: bool = False,
     ) -> CheckResult:
-        """Run all configured routes or the selected subset."""
+        """Run due routes under a process lock, notify, clean up, and persist state.
+
+        Successful partial runs preserve global incident state. Expected delivery failures become
+        route results; notification failures are logged and reported separately.
+
+        Args:
+            route_ids: Route IDs to select in the supplied order; None selects all configured
+                routes.
+            force: Whether to bypass route send intervals; defaults to False.
+
+        Returns:
+            Selected-route health (including saved outcomes for skipped routes), executed route
+            results, skipped IDs, and a separate notification-failure flag.
+
+        Raises:
+            ConfigError: A route ID is unknown, state cannot be loaded, or another run holds the
+                lock.
+            OSError: Lock-file access or state persistence fails.
+        """
 
         selected_routes = self._select_routes(route_ids)
         selected_route_ids = tuple(route.id for route in selected_routes)
@@ -79,11 +111,15 @@ class MailflowMonitor:
                 for address_id, token in result.cleanup_requests:
                     state.cleanup_pending.append(CleanupTask(address_id, result.route_id, token))
 
+            # Skipped routes keep their last known health; an empty batch of executed
+            # checks must not implicitly turn a previously failing run healthy.
             run_success = all(
                 state.routes.get(route_id) is not None
                 and state.routes[route_id].last_success is True
                 for route_id in selected_route_ids
             )
+            # A failed subset can establish an incident, but a healthy subset cannot
+            # establish recovery for routes that were not selected.
             state.last_run_at = now
             if is_full_run or not run_success:
                 state.last_run_success = run_success
@@ -120,6 +156,14 @@ class MailflowMonitor:
             )
 
     def _run_routes(self, routes: tuple[RouteConfig, ...]) -> tuple[RouteRunResult, ...]:
+        """Run due routes concurrently while preserving their input order.
+
+        Args:
+            routes: Due route definitions; may be empty.
+
+        Returns:
+            One result per route in input order, regardless of worker completion order.
+        """
         if len(routes) < 2:
             return tuple(self._run_route(route) for route in routes)
 
@@ -127,21 +171,45 @@ class MailflowMonitor:
             max_workers=len(routes),
             thread_name_prefix="mailflow-route",
         ) as executor:
+            # map preserves input order; workers return results and the caller alone
+            # merges them into shared persistent state after all workers finish.
             return tuple(executor.map(self._run_route, routes))
 
     @staticmethod
     def _is_route_due(route: RouteConfig, state: MonitorState, now: datetime) -> bool:
+        """Check whether a route has no interval restriction or its interval has elapsed.
+
+        Args:
+            route: Route whose configured send interval is checked.
+            state: Saved route timestamps.
+            now: Timezone-aware current time to compare with the last send attempt.
+
+        Returns:
+            True if the route has never run, has no interval, or is due again.
+        """
         if route.send_interval_seconds is None:
             return True
         route_state = state.routes.get(route.id)
         if route_state is None:
             return True
+        # Older state files may only contain last_checked_at.
         last_sent_at = route_state.last_sent_at or route_state.last_checked_at
         if last_sent_at is None:
             return True
         return (now - last_sent_at).total_seconds() >= route.send_interval_seconds
 
     def _select_routes(self, route_ids: Iterable[str] | None) -> tuple[RouteConfig, ...]:
+        """Resolve an optional route selection against configured IDs.
+
+        Args:
+            route_ids: IDs in requested order; None selects all routes in configuration order.
+
+        Returns:
+            Selected route definitions, retaining the supplied order and any duplicate IDs.
+
+        Raises:
+            ConfigError: At least one selected ID is unknown.
+        """
         if route_ids is None:
             return self.config.routes
         wanted = tuple(route_ids)
@@ -152,7 +220,21 @@ class MailflowMonitor:
         return tuple(routes_by_id[route_id] for route_id in wanted)
 
     def _run_route(self, route: RouteConfig) -> RouteRunResult:
+        """Send one message per delivery and verify all configured destination accounts.
+
+        Send-only routes succeed on SMTP acceptance. Delivery and unexpected runtime errors during
+        execution are converted to failure results; verified cleanup requests are retained even if
+        another delivery fails.
+
+        Args:
+            route: Validated route with at least one delivery.
+
+        Returns:
+            Success/failure details, per-delivery tokens, and cleanup requests for verified mail.
+        """
         started_at = self.now_factory()
+        # Separate tokens prevent one arrival from satisfying multiple deliveries
+        # that happen to share the same verification account.
         delivery_tokens = tuple(uuid.uuid4().hex for _ in route.deliveries)
         token = delivery_tokens[0]
         delivery_attempts = tuple(zip(route.deliveries, delivery_tokens, strict=True))
@@ -218,6 +300,21 @@ class MailflowMonitor:
         token: str,
         now: datetime,
     ) -> None:
+        """Build and send a test message for one concrete delivery.
+
+        Args:
+            route: Route defining the SMTP sender and route header.
+            delivery: Delivery defining the actual SMTP target account.
+            token: Unique token assigned to this delivery attempt.
+            now: Timezone-aware creation time used in the message.
+
+        Returns:
+            None.
+
+        Raises:
+            ConfigError: The sender has no SMTP configuration.
+            SmtpError: Sending fails; the error includes route and account context.
+        """
         sender = self.config.addresses[route.from_id]
         if sender.smtp is None:
             raise ConfigError(f"route '{route.id}': sender '{route.from_id}' has no SMTP settings")
@@ -243,6 +340,29 @@ class MailflowMonitor:
         delivery_attempts: tuple[tuple[DeliveryConfig, str], ...],
         cleanup_requests: list[tuple[str, str]],
     ) -> None:
+        """Poll each delivery/account pair until verified or the shared deadline expires.
+
+        The deadline starts after SMTP sends and is checked between polling passes, so blocking
+        network operations may overrun it. Transient errors retry the same token without
+        resending; already verified pairs are not searched again.
+
+        Args:
+            route: Route providing timeout, polling interval, and diagnostic ID.
+            delivery_attempts: Delivery definitions paired with their unique current tokens.
+            cleanup_requests: Mutable output list of verified (account ID, token) pairs to clean
+                up.
+
+        Returns:
+            None when every required delivery/account pair has been verified.
+
+        Raises:
+            ConfigError: An expected account has no IMAP configuration.
+            ImapError: A permanent IMAP failure occurs or transient failures remain at the
+                deadline.
+            DeliveryTimeoutError: The deadline expires after successful searches without all
+                tokens.
+        """
+        # Deduplicate accounts within each delivery while keeping deliveries distinct.
         expectations = tuple(
             (delivery_index, address_id, token)
             for delivery_index, (delivery, token) in enumerate(delivery_attempts)
@@ -285,6 +405,8 @@ class MailflowMonitor:
                         f"route={route.id} delivery={delivery_index} account={address_id} "
                         f"class=ImapError: {exc}"
                     ) from exc
+                # A successful query supersedes a previous connectivity error, even
+                # when the message is still absent, so timeout diagnostics stay accurate.
                 last_transient_errors.pop(expectation_id, None)
                 if has_token:
                     found.add(expectation_id)
@@ -293,6 +415,7 @@ class MailflowMonitor:
             if found == expected_ids:
                 return
             now = self.monotonic()
+            # Check between passes: one blocking IMAP operation can overrun the deadline.
             if now >= deadline:
                 missing = ", ".join(
                     f"delivery={delivery_index} account={address_id}"
@@ -311,6 +434,14 @@ class MailflowMonitor:
             self.sleep(min(route.poll_interval_seconds, max(0.0, deadline - now)))
 
     def _route_direction(self, route: RouteConfig) -> str:
+        """Format the SMTP sender and actual delivery destinations for diagnostics.
+
+        Args:
+            route: Route whose account references are resolved.
+
+        Returns:
+            A sender -> recipient list string; forwarding verification accounts are omitted.
+        """
         sender = self.config.addresses[route.from_id].address
         recipients = [self.config.addresses[delivery.to].address for delivery in route.deliveries]
         return f"{sender} -> {', '.join(recipients)}"
@@ -320,6 +451,18 @@ class MailflowMonitor:
         state: MonitorState,
         results: tuple[RouteRunResult, ...],
     ) -> None:
+        """Replace saved per-route outcomes with the latest executed results.
+
+        The recorded send time is the attempt start, including failed attempts, so repeated
+        failures still obey the configured send interval.
+
+        Args:
+            state: Mutable monitor state to update in place.
+            results: Completed route checks, excluding skipped routes.
+
+        Returns:
+            None.
+        """
         for result in results:
             state.routes[result.route_id] = RouteState(
                 last_success=result.success,
@@ -336,7 +479,18 @@ def build_test_message(
     token: str,
     created_at: datetime,
 ) -> EmailMessage:
-    """Build the unique test message sent for one route run."""
+    """Build a message identifying one delivery attempt in a route run.
+
+    Args:
+        sender: Sender email address for the From header.
+        recipients: Email addresses for the To header.
+        route_id: Route identifier embedded in headers, subject, and body.
+        token: Unique delivery token embedded for subsequent IMAP verification.
+        created_at: Timezone-aware creation time for the Date header and body.
+
+    Returns:
+        Unsent plain-text email containing route/token headers and a generated Message-ID.
+    """
 
     message = EmailMessage()
     message["From"] = sender
@@ -359,7 +513,14 @@ def build_test_message(
 
 
 def result_to_json(result: CheckResult) -> str:
-    """Serialize a check result without exposing credentials."""
+    """Serialize check results without including account configuration.
+
+    Args:
+        result: Completed run result to serialize.
+
+    Returns:
+        Indented JSON with route outcomes, timestamps, delivery tokens, and notification status.
+    """
 
     payload = {
         "success": result.success,
@@ -383,7 +544,14 @@ def result_to_json(result: CheckResult) -> str:
 
 
 def render_text_summary(result: CheckResult) -> str:
-    """Render a human-readable CLI summary."""
+    """Render CLI outcomes for executed and skipped routes.
+
+    Args:
+        result: Completed run result to summarize.
+
+    Returns:
+        Multiline summary whose overall status also accounts for notification failures.
+    """
 
     lines = ["mailflow-monitor check summary"]
     for item in result.route_results:
@@ -399,6 +567,15 @@ def render_text_summary(result: CheckResult) -> str:
 
 
 def _state_failure_details(state: MonitorState, route_ids: tuple[str, ...]) -> str:
+    """Collect known route failures from persisted state for notifications.
+
+    Args:
+        state: Saved route outcomes and error descriptions.
+        route_ids: IDs to inspect in output order.
+
+    Returns:
+        Newline-separated failure descriptions, or an empty string if none are recorded.
+    """
     failures = []
     for route_id in route_ids:
         route_state = state.routes.get(route_id)

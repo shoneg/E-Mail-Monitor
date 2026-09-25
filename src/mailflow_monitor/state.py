@@ -15,13 +15,24 @@ from .models import ConfigError
 
 
 def utc_now() -> datetime:
-    """Return the current UTC time as a timezone-aware ``datetime``."""
+    """Read the current wall-clock time in UTC.
+
+    Returns:
+        Timezone-aware UTC datetime.
+    """
 
     return datetime.now(UTC)
 
 
 def format_dt(value: datetime | None) -> str | None:
-    """Serialize timestamps consistently for JSON and CLI output."""
+    """Normalize a timestamp to the UTC representation used in persisted JSON.
+
+    Args:
+        value: Timezone-aware timestamp, or None for an unset field.
+
+    Returns:
+        ISO 8601 timestamp ending in Z, or None when unset.
+    """
 
     if value is None:
         return None
@@ -29,7 +40,17 @@ def format_dt(value: datetime | None) -> str | None:
 
 
 def parse_dt(value: str | None) -> datetime | None:
-    """Parse ISO timestamps from the state file."""
+    """Parse a persisted ISO timestamp and normalize it to UTC.
+
+    Args:
+        value: ISO 8601 string with an offset or Z suffix, or None.
+
+    Returns:
+        Timezone-aware UTC datetime, or None when unset.
+
+    Raises:
+        ValueError: The string is not a valid ISO timestamp.
+    """
 
     if value is None:
         return None
@@ -46,6 +67,11 @@ class RouteState:
     last_sent_at: datetime | None = None
 
     def to_json(self) -> dict[str, Any]:
+        """Serialize one route outcome into JSON-compatible values.
+
+        Returns:
+            Dictionary with timestamps encoded as UTC strings or None.
+        """
         return {
             "last_success": self.last_success,
             "last_sent_at": format_dt(self.last_sent_at),
@@ -55,6 +81,17 @@ class RouteState:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> RouteState:
+        """Reconstruct one route outcome from persisted values.
+
+        Args:
+            data: Decoded JSON object representing one route outcome.
+
+        Returns:
+            RouteState instance with timestamps parsed and missing optional fields defaulted.
+
+        Raises:
+            ValueError: A stored timestamp cannot be parsed.
+        """
         return cls(
             last_success=data.get("last_success"),
             last_sent_at=parse_dt(data.get("last_sent_at")),
@@ -74,6 +111,11 @@ class CleanupTask:
     next_attempt_at: datetime | None = None
 
     def to_json(self) -> dict[str, Any]:
+        """Serialize one pending cleanup task into JSON-compatible values.
+
+        Returns:
+            Dictionary with timestamps encoded as UTC strings or None.
+        """
         return {
             "address_id": self.address_id,
             "route_id": self.route_id,
@@ -84,6 +126,18 @@ class CleanupTask:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> CleanupTask:
+        """Reconstruct one pending cleanup task from persisted values.
+
+        Args:
+            data: Decoded JSON object representing one pending cleanup task.
+
+        Returns:
+            CleanupTask instance with timestamps parsed and missing optional fields defaulted.
+
+        Raises:
+            ValueError: A stored timestamp cannot be parsed.
+            KeyError: A required account ID, route ID, or token is absent.
+        """
         return cls(
             address_id=data["address_id"],
             route_id=data["route_id"],
@@ -110,6 +164,11 @@ class MonitorState:
     last_cleanup_alert_at: datetime | None = None
 
     def to_json(self) -> dict[str, Any]:
+        """Serialize monitor, route, incident, and cleanup state into JSON-compatible values.
+
+        Returns:
+            Dictionary with timestamps encoded as UTC strings or None.
+        """
         return {
             "last_run_at": format_dt(self.last_run_at),
             "last_run_success": self.last_run_success,
@@ -126,6 +185,19 @@ class MonitorState:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> MonitorState:
+        """Reconstruct monitor, route, incident, and cleanup state from persisted values.
+
+        Args:
+            data: Decoded JSON object representing monitor, route, incident, and cleanup state.
+
+        Returns:
+            MonitorState instance with timestamps parsed and missing optional fields defaulted.
+
+        Raises:
+            ValueError: A stored timestamp cannot be parsed.
+            ConfigError: Routes or an individual route entry is not an object.
+            KeyError: A cleanup task lacks a required identifier.
+        """
         routes_raw = data.get("routes", {})
         if not isinstance(routes_raw, dict):
             raise ConfigError("state.routes: must be an object")
@@ -155,10 +227,27 @@ class StateStore:
     """Load and save the local JSON state file."""
 
     def __init__(self, path: str) -> None:
+        """Select a state file without reading or creating it.
+
+        Args:
+            path: Filesystem path of the persistent JSON state file.
+
+        Returns:
+            None.
+        """
         self.path = Path(path)
 
     def load(self) -> MonitorState:
-        """Load the state, or return an empty state when the file does not exist."""
+        """Read persisted state, or initialize empty state when no file exists.
+
+        Returns:
+            Restored monitor state or a fresh MonitorState for a missing file.
+
+        Raises:
+            ConfigError: Reading/JSON decoding fails or the state/route object shape is invalid.
+            ValueError: A persisted timestamp cannot be parsed.
+            KeyError: A cleanup task lacks a required identifier.
+        """
 
         if not self.path.exists():
             return MonitorState()
@@ -173,9 +262,24 @@ class StateStore:
         return MonitorState.from_json(raw)
 
     def save(self, state: MonitorState) -> None:
-        """Write the state atomically by fsyncing a temporary file and replacing."""
+        """Persist state by syncing a temporary file and atomically replacing the target.
+
+        The caller must serialize writers with FileLock because the temporary filename is shared.
+        The temporary file is removed on failure when it still exists.
+
+        Args:
+            state: Monitor state to serialize to disk.
+
+        Returns:
+            None.
+
+        Raises:
+            OSError: Creating, writing, syncing, replacing, or removing a file fails.
+        """
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # A sibling temporary file keeps replacement on the same filesystem, where
+        # rename is atomic; readers see either the old or the complete new JSON.
         tmp_path = self.path.with_name(f".{self.path.name}.tmp")
         payload = json.dumps(state.to_json(), indent=2, sort_keys=True) + "\n"
         try:
@@ -197,10 +301,27 @@ class FileLock(AbstractContextManager["FileLock"]):
     """
 
     def __init__(self, path: str) -> None:
+        """Select the advisory lock file without acquiring it.
+
+        Args:
+            path: Lock-file path shared by all processes using the same monitor state.
+
+        Returns:
+            None.
+        """
         self.path = Path(path)
         self._handle: Any = None
 
     def __enter__(self) -> FileLock:
+        """Acquire an exclusive advisory lock without waiting for another run.
+
+        Returns:
+            This lock instance, holding an open file handle until context exit.
+
+        Raises:
+            ConfigError: Another process already holds the lock.
+            OSError: The lock directory/file cannot be opened or locking fails.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = self.path.open("a+", encoding="utf-8")
         try:
@@ -218,6 +339,19 @@ class FileLock(AbstractContextManager["FileLock"]):
         exc: object,
         traceback: object,
     ) -> Literal[False]:
+        """Release the advisory lock and close its file handle.
+
+        Args:
+            exc_type: Exception type from the with block, or None; unused.
+            exc: Exception instance from the with block, or None; unused.
+            traceback: Exception traceback from the with block, or None; unused.
+
+        Returns:
+            False so exceptions raised inside the context propagate.
+
+        Raises:
+            OSError: Unlocking or closing the lock file fails.
+        """
         if self._handle is not None:
             fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
             self._handle.close()

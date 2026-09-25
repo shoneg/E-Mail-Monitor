@@ -14,7 +14,17 @@ SECRET_PATTERNS = (
 
 
 def normalize_log_level(level: str) -> str:
-    """Return a validated uppercase logging level."""
+    """Normalize and validate a configured logging level.
+
+    Args:
+        level: Level name; surrounding whitespace and case are ignored.
+
+    Returns:
+        One of DEBUG, INFO, WARNING, ERROR, or CRITICAL.
+
+    Raises:
+        ValueError: The normalized name is unsupported.
+    """
 
     normalized = level.strip().upper()
     if normalized not in VALID_LOG_LEVELS:
@@ -31,16 +41,40 @@ class SecretRedactingFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        """Redact password/token assignments in the formatted log message in place.
+
+        Only patterns in SECRET_PATTERNS are masked; this is not a general secret scanner.
+
+        Args:
+            record: Log record whose message and interpolation arguments are updated.
+
+        Returns:
+            True, allowing the redacted record to be emitted.
+        """
         message = record.getMessage()
         for pattern in SECRET_PATTERNS:
             message = pattern.sub(r"\1<redacted>", message)
         record.msg = message
+        # getMessage() already applied interpolation; clear arguments so handlers
+        # do not format the sanitized message again with the original secret values.
         record.args = ()
         return True
 
 
 def configure_logging(level: str) -> None:
-    """Configure stderr logging for CLI runs."""
+    """Set the root log level and attach redaction to every current handler.
+
+    Installs the default stderr handler only if logging has no handlers yet.
+
+    Args:
+        level: Supported logging level, compared case-insensitively.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: The log level is unsupported.
+    """
 
     normalized = normalize_log_level(level)
     numeric_level = getattr(logging, normalized)
@@ -50,11 +84,21 @@ def configure_logging(level: str) -> None:
         level=numeric_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Propagated child records bypass root logger filters but still pass through
+    # handler filters, so redaction belongs on every output handler.
     for handler in root_logger.handlers:
         _ensure_redacting_filter(handler)
 
 
 def _ensure_redacting_filter(handler: logging.Handler) -> None:
+    """Attach a secret filter unless this handler already has one.
+
+    Args:
+        handler: Output handler to inspect and, if necessary, modify.
+
+    Returns:
+        None.
+    """
     if any(isinstance(existing, SecretRedactingFilter) for existing in handler.filters):
         return
     handler.addFilter(SecretRedactingFilter())

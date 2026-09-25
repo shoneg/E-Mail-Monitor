@@ -11,9 +11,30 @@ class RecordingSmtpClient:
     fail = False
 
     def __init__(self, config) -> None:
+        """Store account settings for the in-memory client double.
+
+        Args:
+            config: Connection settings supplied by the monitor; no network connection is opened.
+
+        Returns:
+            None.
+        """
         self.config = config
 
     def send_message(self, sender: str, recipients: list[str], message) -> None:
+        """Capture notification metadata or simulate an SMTP failure.
+
+        Args:
+            sender: Envelope sender address to record.
+            recipients: Envelope recipient addresses to record.
+            message: EmailMessage provided by the code under test.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: The shared fail switch is enabled.
+        """
         if self.fail:
             raise RuntimeError("boom")
         self.sent.append(
@@ -27,11 +48,26 @@ class RecordingSmtpClient:
 
 
 def setup_function() -> None:
+    """Reset shared client-double recordings and failure switches before each test.
+
+    Returns:
+        None.
+    """
     RecordingSmtpClient.sent = []
     RecordingSmtpClient.fail = False
 
 
 def test_alert_is_sent_for_new_incident(loaded_example_config, fixed_now) -> None:
+    """Verify the first failing run opens an incident and records a successful alert.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+        fixed_now: Deterministic timezone-aware UTC timestamp supplied by the fixture.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     state = MonitorState()
     manager = NotificationManager(loaded_example_config, RecordingSmtpClient)
 
@@ -44,6 +80,16 @@ def test_alert_is_sent_for_new_incident(loaded_example_config, fixed_now) -> Non
 
 
 def test_repeated_alerts_are_rate_limited(loaded_example_config, fixed_now) -> None:
+    """Verify an ongoing incident does not send alerts inside the repeat interval.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+        fixed_now: Deterministic timezone-aware UTC timestamp supplied by the fixture.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     state = MonitorState(incident_started_at=fixed_now, last_alert_at=fixed_now)
     manager = NotificationManager(loaded_example_config, RecordingSmtpClient)
 
@@ -53,6 +99,16 @@ def test_repeated_alerts_are_rate_limited(loaded_example_config, fixed_now) -> N
 
 
 def test_recovery_message_is_sent_after_success(loaded_example_config, fixed_now) -> None:
+    """Verify a healthy run sends recovery and clears the previous incident.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+        fixed_now: Deterministic timezone-aware UTC timestamp supplied by the fixture.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     state = MonitorState(incident_started_at=fixed_now - timedelta(hours=1), last_run_success=True)
     manager = NotificationManager(loaded_example_config, RecordingSmtpClient)
 
@@ -64,6 +120,16 @@ def test_recovery_message_is_sent_after_success(loaded_example_config, fixed_now
 
 
 def test_aliveness_respects_interval(loaded_example_config, fixed_now) -> None:
+    """Verify successive healthy runs send only one aliveness message within its interval.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+        fixed_now: Deterministic timezone-aware UTC timestamp supplied by the fixture.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     state = MonitorState(last_run_success=True)
     manager = NotificationManager(loaded_example_config, RecordingSmtpClient)
 
@@ -81,6 +147,16 @@ def test_cleanup_warning_threshold_per_account_and_independent_cooldown(
     loaded_example_config,
     fixed_now,
 ) -> None:
+    """Verify cleanup thresholds are per account and use a separate warning cooldown.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+        fixed_now: Deterministic timezone-aware UTC timestamp supplied by the fixture.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     from dataclasses import replace
 
     config = replace(
@@ -109,6 +185,16 @@ def test_cleanup_warning_threshold_per_account_and_independent_cooldown(
 
 
 def test_failed_cleanup_warning_can_be_retried(loaded_example_config, fixed_now) -> None:
+    """Verify a failed warning leaves its send timestamp unset so it can be retried.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+        fixed_now: Deterministic timezone-aware UTC timestamp supplied by the fixture.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     from dataclasses import replace
 
     import pytest

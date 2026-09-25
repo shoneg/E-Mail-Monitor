@@ -6,12 +6,22 @@ from mailflow_monitor.cli import build_parser
 
 
 def test_check_log_level_argument_is_case_insensitive() -> None:
+    """Verify the check command normalizes lowercase logging levels.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     args = build_parser().parse_args(["check", "--log-level", "debug"])
 
     assert args.log_level == "DEBUG"
 
 
 def test_validate_config_rejects_unknown_log_level() -> None:
+    """Verify unsupported CLI logging levels exit with an argument error.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     with pytest.raises(SystemExit) as exc_info:
         build_parser().parse_args(["validate-config", "--log-level", "verbose"])
 

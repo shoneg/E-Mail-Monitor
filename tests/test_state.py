@@ -9,6 +9,14 @@ from mailflow_monitor.state import MonitorState, RouteState, StateStore, utc_now
 
 
 def test_state_is_written_atomically_and_loaded(tmp_path: Path) -> None:
+    """Verify state round-trips through JSON without leaving the temporary file behind.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "var" / "state.json"
     store = StateStore(str(path))
     state = MonitorState(last_run_at=utc_now(), last_run_success=True)
@@ -23,6 +31,14 @@ def test_state_is_written_atomically_and_loaded(tmp_path: Path) -> None:
 
 
 def test_corrupted_state_file_fails_clearly(tmp_path: Path) -> None:
+    """Verify malformed state JSON raises a configuration error with a useful message.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "state.json"
     path.write_text("{not-json", encoding="utf-8")
 

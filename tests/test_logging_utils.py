@@ -8,6 +8,11 @@ from mailflow_monitor.logging_utils import configure_logging, normalize_log_leve
 
 
 def test_normalize_log_level_is_case_insensitive_and_rejects_unknown_values() -> None:
+    """Verify level normalization accepts mixed formatting and rejects unsupported names.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     assert normalize_log_level(" debug ") == "DEBUG"
 
     with pytest.raises(ValueError, match="unsupported log level"):
@@ -15,6 +20,14 @@ def test_normalize_log_level_is_case_insensitive_and_rejects_unknown_values() ->
 
 
 def test_configure_logging_redacts_child_logger_records(capsys) -> None:
+    """Verify handler filtering masks secrets in records propagated from child loggers.
+
+    Args:
+        capsys: Pytest fixture capturing stdout and stderr for output assertions.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     root = logging.getLogger()
     old_handlers = root.handlers[:]
     old_filters = root.filters[:]

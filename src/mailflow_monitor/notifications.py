@@ -23,6 +23,16 @@ class NotificationManager:
         config: AppConfig,
         smtp_client_factory: type[SmtpClient] = SmtpClient,
     ) -> None:
+        """Configure notification policy and the SMTP client constructor.
+
+        Args:
+            config: Validated account definitions and notification settings.
+            smtp_client_factory: Callable constructing an SMTP client from sender connection
+                settings.
+
+        Returns:
+            None.
+        """
         self.config = config
         self.smtp_client_factory = smtp_client_factory
 
@@ -33,7 +43,25 @@ class NotificationManager:
         failure_details: str,
         now: datetime,
     ) -> None:
-        """Send due notifications and update notification timestamps in state."""
+        """Apply incident/recovery policy and update notification state in place.
+
+        Healthy runs may send recovery and aliveness mail before clearing the incident. Failed
+        runs open/update an incident and may send a rate-limited alert. The caller must decide
+        whether a partial run is eligible and persist the changed state.
+
+        Args:
+            state: Mutable monitor state containing incident details and successful-send
+                timestamps.
+            run_success: Whether the checked routes are healthy.
+            failure_details: Human-readable route failures for incident alerts.
+            now: Timezone-aware current time used for policy checks and message dates.
+
+        Returns:
+            None.
+
+        Raises:
+            NotificationError: A required sender is unavailable or SMTP delivery fails.
+        """
 
         if run_success:
             self._maybe_send_recovery(state, now)
@@ -50,7 +78,21 @@ class NotificationManager:
         self._maybe_send_alert(state, failure_details, now)
 
     def maybe_send_cleanup_warning(self, state: MonitorState, now: datetime) -> None:
-        """Warn about repeated exhausted cleanups without opening a delivery incident."""
+        """Warn when completed cleanup failures reach a per-account threshold.
+
+        Only active IMAP accounts are considered. The warning has its own cooldown and does not
+        open a delivery incident; the timestamp advances only after a successful send.
+
+        Args:
+            state: Mutable cleanup history and independent cleanup-warning timestamp.
+            now: Timezone-aware current time used for policy checks and message dates.
+
+        Returns:
+            None.
+
+        Raises:
+            NotificationError: A required sender is unavailable or SMTP delivery fails.
+        """
         alerts = self.config.notifications.alerts
         settings = self.config.monitor
         if not alerts.enabled or not settings.cleanup_received_test_messages:
@@ -83,9 +125,26 @@ class NotificationManager:
             "they may remain in the mailbox or be marked deleted.\n\n" + "\n".join(details),
             now,
         )
+        # Failed sends must not consume the cooldown or suppress the next retry.
         state.last_cleanup_alert_at = now
 
     def _maybe_send_alert(self, state: MonitorState, details: str, now: datetime) -> None:
+        """Send an enabled incident alert if its repeat interval has elapsed.
+
+        Updates last_alert_at only after successful SMTP delivery.
+
+        Args:
+            state: Mutable monitor state containing incident details and successful-send
+                timestamps.
+            details: Failure descriptions to include in the alert body.
+            now: Timezone-aware current time used for policy checks and message dates.
+
+        Returns:
+            None.
+
+        Raises:
+            NotificationError: A required sender is unavailable or SMTP delivery fails.
+        """
         alerts = self.config.notifications.alerts
         if not alerts.enabled:
             return
@@ -105,6 +164,21 @@ class NotificationManager:
         state.last_alert_at = now
 
     def _maybe_send_recovery(self, state: MonitorState, now: datetime) -> None:
+        """Send an enabled recovery message when a previous incident is recorded.
+
+        Updates last_recovery_at after sending; the caller clears the incident.
+
+        Args:
+            state: Mutable monitor state containing incident details and successful-send
+                timestamps.
+            now: Timezone-aware current time used for policy checks and message dates.
+
+        Returns:
+            None.
+
+        Raises:
+            NotificationError: A required sender is unavailable or SMTP delivery fails.
+        """
         alerts = self.config.notifications.alerts
         if not alerts.enabled or not alerts.send_recovery_message:
             return
@@ -120,6 +194,22 @@ class NotificationManager:
         state.last_recovery_at = now
 
     def _maybe_send_aliveness(self, state: MonitorState, now: datetime) -> None:
+        """Send aliveness mail when enabled, eligible, and due.
+
+        Checks saved run health when only_when_healthy is enabled and advances last_aliveness_at
+        only after a successful send.
+
+        Args:
+            state: Mutable monitor state containing incident details and successful-send
+                timestamps.
+            now: Timezone-aware current time used for policy checks and message dates.
+
+        Returns:
+            None.
+
+        Raises:
+            NotificationError: A required sender is unavailable or SMTP delivery fails.
+        """
         aliveness = self.config.notifications.aliveness
         if not aliveness.enabled:
             return
@@ -145,6 +235,21 @@ class NotificationManager:
         body: str,
         now: datetime,
     ) -> None:
+        """Resolve notification accounts, construct an email, and send it via SMTP.
+
+        Args:
+            sender_id: Configured SMTP sender account ID; None is an error.
+            recipient_refs: Validated email addresses or account:<id> references.
+            subject: Subject header for the notification.
+            body: Plain-text notification body.
+            now: Timezone-aware current time used for policy checks and message dates.
+
+        Returns:
+            None.
+
+        Raises:
+            NotificationError: A required sender is unavailable or SMTP delivery fails.
+        """
         if sender_id is None:
             raise NotificationError("notification sender is not configured")
         sender = self.config.addresses[sender_id]

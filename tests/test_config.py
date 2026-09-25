@@ -10,6 +10,15 @@ from mailflow_monitor.models import ConfigError, TlsMode
 
 
 def test_parses_and_validates_example_config(loaded_example_config) -> None:
+    """Verify the shipped example resolves environment credentials, routes, and paths.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     config = loaded_example_config
 
     assert len(config.routes) == 4
@@ -22,6 +31,14 @@ def test_parses_and_validates_example_config(loaded_example_config) -> None:
 
 
 def test_send_only_route_does_not_require_expect_at(tmp_path: Path) -> None:
+    """Verify omitted expect_at permits a send-only route without IMAP settings.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "config.toml"
     path.write_text(
         """
@@ -58,6 +75,14 @@ to = "healthcheck"
 
 
 def test_send_interval_must_be_positive(tmp_path: Path) -> None:
+    """Verify a non-positive route send interval is rejected during configuration loading.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "config.toml"
     path.write_text(
         """
@@ -90,6 +115,14 @@ to = "target"
 
 
 def test_missing_environment_variable_fails(tmp_path: Path) -> None:
+    """Verify unresolved environment references fail configuration loading.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "config.toml"
     path.write_text(
         """
@@ -131,6 +164,14 @@ expect_at = ["recipient"]
 
 
 def test_loads_environment_from_dotenv_next_to_config(tmp_path: Path) -> None:
+    """Verify configuration loading uses the adjacent .env file for substitutions.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "config.toml"
     path.write_text(
         """
@@ -170,6 +211,15 @@ def test_process_environment_overrides_dotenv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify process environment values take precedence over adjacent .env assignments.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+        monkeypatch: Pytest fixture for temporary environment or dependency replacements.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "config.toml"
     path.write_text(
         """
@@ -207,6 +257,15 @@ def test_dotenv_log_level_overrides_toml(
     tmp_path: Path,
     example_env: None,
 ) -> None:
+    """Verify the environment logging override takes precedence over TOML settings.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+        example_env: Fixture dependency installing the example environment secrets; yields None.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "config.toml"
     path.write_text(Path("config.example.toml").read_text(encoding="utf-8"), encoding="utf-8")
     (tmp_path / ".env").write_text(
@@ -220,6 +279,14 @@ def test_dotenv_log_level_overrides_toml(
 
 
 def test_invalid_environment_log_level_fails(tmp_path: Path) -> None:
+    """Verify an invalid environment logging override raises a configuration error.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "config.toml"
     path.write_text("[monitor]\n[addresses]\n", encoding="utf-8")
     (tmp_path / ".env").write_text(
@@ -232,6 +299,14 @@ def test_invalid_environment_log_level_fails(tmp_path: Path) -> None:
 
 
 def test_invalid_dotenv_entry_fails_with_line_number(tmp_path: Path) -> None:
+    """Verify malformed .env input reports the source line in its configuration error.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "config.toml"
     path.write_text("[monitor]\n[addresses]\n", encoding="utf-8")
     (tmp_path / ".env").write_text("# comment\nINVALID ENTRY\n", encoding="utf-8")
@@ -244,6 +319,15 @@ def test_environment_expansion_happens_after_toml_parse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify quotes in substituted secrets remain data instead of changing TOML syntax.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+        monkeypatch: Pytest fixture for temporary environment or dependency replacements.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     dangerous_value = 'quote" and newline\n[[routes]]\nid = "not-a-real-route"'
     monkeypatch.setenv("SPECIAL_PASSWORD", dangerous_value)
     path = tmp_path / "config.toml"
@@ -288,6 +372,14 @@ expect_at = ["recipient"]
 
 
 def test_invalid_route_reference_reports_config_path(tmp_path: Path) -> None:
+    """Verify unknown route accounts report the offending configuration field.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "config.toml"
     path.write_text(
         """
@@ -319,6 +411,14 @@ expect_at = ["missing"]
 
 
 def test_plain_tls_requires_explicit_insecure_opt_in(tmp_path: Path) -> None:
+    """Verify plaintext transport is rejected without an explicit security opt-in.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "config.toml"
     path.write_text(
         """
@@ -360,6 +460,14 @@ expect_at = ["recipient"]
 
 
 def test_plain_tls_allowed_with_explicit_opt_in(tmp_path: Path) -> None:
+    """Verify plaintext SMTP and IMAP settings are accepted with explicit opt-in.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for isolated configuration/state files.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = tmp_path / "config.toml"
     path.write_text(
         """
@@ -413,6 +521,17 @@ expect_at = ["recipient"]
     ],
 )
 def test_cleanup_settings_are_validated(loaded_example_config, key, value):
+    """Verify invalid cleanup limits, windows, and types are rejected.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+        key: Parameterized cleanup setting to replace in the example configuration.
+        value: Parameterized invalid setting value to serialize into TOML.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = Path(loaded_example_config.config_path)
     text = path.read_text()
     literal = str(value).lower()
@@ -423,6 +542,15 @@ def test_cleanup_settings_are_validated(loaded_example_config, key, value):
 
 
 def test_cleanup_settings_can_be_overridden(loaded_example_config):
+    """Verify custom cleanup retry and failure-window settings survive parsing.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     path = Path(loaded_example_config.config_path)
     text = path.read_text()
     for key, value in {

@@ -17,9 +17,30 @@ class FakeSmtpClient:
     fail_test_delivery = False
 
     def __init__(self, config) -> None:
+        """Store account settings for the in-memory client double.
+
+        Args:
+            config: Connection settings supplied by the monitor; no network connection is opened.
+
+        Returns:
+            None.
+        """
         self.config = config
 
     def send_message(self, sender: str, recipients: list[str], message) -> None:
+        """Record outgoing mail or simulate a configured test-message failure.
+
+        Args:
+            sender: Envelope sender address to record.
+            recipients: Envelope recipient addresses to record.
+            message: EmailMessage provided by the code under test.
+
+        Returns:
+            None.
+
+        Raises:
+            SmtpError: Test delivery failure is enabled and the message has a token header.
+        """
         if self.fail_test_delivery and message.get("X-Mailflow-Monitor-Token"):
             raise SmtpError("SMTP: forced test failure")
         self.sent.append({"sender": sender, "recipients": recipients, "message": message})
@@ -31,9 +52,30 @@ class FakeImapClient:
     calls: list[dict[str, object]] = []
 
     def __init__(self, config) -> None:
+        """Store account settings for the in-memory client double.
+
+        Args:
+            config: Connection settings supplied by the monitor; no network connection is opened.
+
+        Returns:
+            None.
+        """
         self.config = config
 
     def find_token(self, token: str, route_id: str, cleanup: bool = False) -> bool:
+        """Record a lookup and simulate account-specific matching or failure.
+
+        Args:
+            token: Delivery token supplied by the monitor.
+            route_id: Route ID supplied for matching.
+            cleanup: Whether this call requests deletion instead of read-only verification.
+
+        Returns:
+            True if the account username belongs to found_usernames, otherwise False.
+
+        Raises:
+            ImapError: The account username belongs to fail_usernames.
+        """
         self.calls.append(
             {
                 "username": self.config.username,
@@ -48,6 +90,11 @@ class FakeImapClient:
 
 
 def setup_function() -> None:
+    """Reset shared client-double recordings and failure switches before each test.
+
+    Returns:
+        None.
+    """
     FakeSmtpClient.sent = []
     FakeSmtpClient.fail_test_delivery = False
     FakeImapClient.found_usernames = set()
@@ -56,6 +103,15 @@ def setup_function() -> None:
 
 
 def test_successful_direct_delivery_path(loaded_example_config) -> None:
+    """Verify direct delivery sends to and checks the configured destination.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     FakeImapClient.found_usernames = {"monitor-in@stalwart.example"}
     monitor = MailflowMonitor(
         loaded_example_config,
@@ -71,6 +127,15 @@ def test_successful_direct_delivery_path(loaded_example_config) -> None:
 
 
 def test_successful_alias_forwarding_path_to_differs_from_expect_at(loaded_example_config) -> None:
+    """Verify alias delivery sends to the alias but checks the forwarding destination.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     FakeImapClient.found_usernames = {"monitor-target@example-external.net"}
     monitor = MailflowMonitor(
         loaded_example_config,
@@ -86,6 +151,15 @@ def test_successful_alias_forwarding_path_to_differs_from_expect_at(loaded_examp
 
 
 def test_timeout_waiting_for_delivery(loaded_example_config) -> None:
+    """Verify an absent token becomes a delivery timeout when the fake deadline expires.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     route = next(
         route for route in loaded_example_config.routes if route.id == "external-to-stalwart"
     )
@@ -106,6 +180,15 @@ def test_timeout_waiting_for_delivery(loaded_example_config) -> None:
 
 
 def test_smtp_error_marks_route_failed(loaded_example_config) -> None:
+    """Verify SMTP failures become failed route results with the original error class.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     FakeSmtpClient.fail_test_delivery = True
     monitor = MailflowMonitor(
         loaded_example_config,
@@ -120,6 +203,15 @@ def test_smtp_error_marks_route_failed(loaded_example_config) -> None:
 
 
 def test_imap_error_marks_route_failed(loaded_example_config) -> None:
+    """Verify permanent IMAP errors fail the route instead of being retried.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     FakeImapClient.fail_usernames = {"monitor-in@stalwart.example"}
     monitor = MailflowMonitor(
         loaded_example_config,
@@ -134,6 +226,15 @@ def test_imap_error_marks_route_failed(loaded_example_config) -> None:
 
 
 def test_monitor_state_file_is_updated(loaded_example_config) -> None:
+    """Verify completing a route check creates the configured persistent state file.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     FakeImapClient.found_usernames = {"monitor-in@stalwart.example"}
     monitor = MailflowMonitor(
         loaded_example_config,
@@ -150,6 +251,16 @@ def test_route_is_skipped_until_send_interval_has_elapsed(
     loaded_example_config,
     fixed_now,
 ) -> None:
+    """Verify saved health is reused until the send interval permits a new message.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+        fixed_now: Deterministic timezone-aware UTC timestamp supplied by the fixture.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     route = next(
         route for route in loaded_example_config.routes if route.id == "external-to-stalwart"
     )
@@ -182,6 +293,16 @@ def test_route_is_skipped_until_send_interval_has_elapsed(
 
 
 def test_force_bypasses_send_interval(loaded_example_config, fixed_now) -> None:
+    """Verify a forced run sends again even when its normal interval has not elapsed.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+        fixed_now: Deterministic timezone-aware UTC timestamp supplied by the fixture.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     route = next(
         route for route in loaded_example_config.routes if route.id == "external-to-stalwart"
     )
@@ -203,6 +324,15 @@ def test_force_bypasses_send_interval(loaded_example_config, fixed_now) -> None:
 
 
 def test_send_only_route_succeeds_without_imap_check(loaded_example_config) -> None:
+    """Verify SMTP acceptance is sufficient when no verification account is configured.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     route = next(
         route for route in loaded_example_config.routes if route.id == "external-to-stalwart"
     )
@@ -222,6 +352,15 @@ def test_send_only_route_succeeds_without_imap_check(loaded_example_config) -> N
 
 
 def test_each_delivery_uses_a_distinct_message_and_token(loaded_example_config) -> None:
+    """Verify each route delivery gets its own recipient, message, and token.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     route = next(
         route for route in loaded_example_config.routes if route.id == "external-to-stalwart"
     )
@@ -249,6 +388,15 @@ def test_each_delivery_uses_a_distinct_message_and_token(loaded_example_config) 
 
 
 def test_one_delivery_cannot_satisfy_another_delivery_check(loaded_example_config) -> None:
+    """Verify one arriving message cannot satisfy two deliveries to the same account.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     route = next(
         route for route in loaded_example_config.routes if route.id == "external-to-stalwart"
     )
@@ -263,6 +411,16 @@ def test_one_delivery_cannot_satisfy_another_delivery_check(loaded_example_confi
 
     class OnlyFirstDeliveryArrives(FakeImapClient):
         def find_token(self, token: str, route_id: str, cleanup: bool = False) -> bool:
+            """Record the lookup and recognize only the first sent test message.
+
+            Args:
+                token: Delivery token supplied by the monitor.
+                route_id: Route ID supplied for matching.
+                cleanup: Whether this call requests deletion instead of read-only verification.
+
+            Returns:
+                True only if the supplied token matches the first recorded test message.
+            """
             self.calls.append(
                 {
                     "username": self.config.username,
@@ -293,6 +451,16 @@ def test_successful_partial_run_does_not_clear_global_incident(
     loaded_example_config,
     fixed_now,
 ) -> None:
+    """Verify a healthy route subset neither clears global failure nor sends recovery.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+        fixed_now: Deterministic timezone-aware UTC timestamp supplied by the fixture.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     incident_started_at = fixed_now - timedelta(hours=1)
     FakeImapClient.found_usernames = {"monitor-in@stalwart.example"}
     monitor = MailflowMonitor(
@@ -322,6 +490,15 @@ def test_successful_partial_run_does_not_clear_global_incident(
 def test_due_routes_run_concurrently_and_results_keep_config_order(
     loaded_example_config,
 ) -> None:
+    """Verify routes overlap in execution while their results retain configuration order.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     first, second = loaded_example_config.routes[:2]
     routes = tuple(
         replace(route, deliveries=(replace(route.deliveries[0], expect_at=()),))
@@ -334,12 +511,27 @@ def test_due_routes_run_concurrently_and_results_keep_config_order(
 
     class ConcurrentSmtpClient(FakeSmtpClient):
         def send_message(self, sender: str, recipients: list[str], message) -> None:
+            """Require all route sends to start before recording each message.
+
+            Args:
+                sender: Envelope sender address to record.
+                recipients: Envelope recipient addresses to record.
+                message: EmailMessage provided by the code under test.
+
+            Returns:
+                None.
+
+            Raises:
+                SmtpError: Not all routes reach the synchronization event within one second.
+            """
             nonlocal started_route_count
             if message.get("X-Mailflow-Monitor-Token"):
                 with start_lock:
                     started_route_count += 1
                     if started_route_count == len(routes):
                         all_routes_started.set()
+                # Waiting outside the lock lets the other worker reach the event;
+                # serial execution times out here and makes the route fail.
                 if not all_routes_started.wait(timeout=1):
                     raise SmtpError("routes did not run concurrently")
             super().send_message(sender, recipients, message)
@@ -361,10 +553,23 @@ def test_due_routes_run_concurrently_and_results_keep_config_order(
 
 
 def _sequence(*values: float):
+    """Build a deterministic clock that repeats its last value after exhaustion.
+
+    Args:
+        *values: Non-empty sequence of seconds to return on successive calls.
+
+    Returns:
+        Zero-argument callable returning the next value or the last value indefinitely.
+    """
     iterator = iter(values)
     last = values[-1]
 
     def next_value() -> float:
+        """Advance the fake clock once, retaining the last value when exhausted.
+
+        Returns:
+            Next configured time value, or the previous value after exhaustion.
+        """
         nonlocal last
         with suppress(StopIteration):
             last = next(iterator)
@@ -374,16 +579,43 @@ def _sequence(*values: float):
 
 
 def _sent_test_messages() -> list[dict[str, object]]:
+    """Select recorded SMTP messages carrying the monitor token header.
+
+    Returns:
+        Recorded test-message dictionaries, excluding incident and aliveness emails.
+    """
     return [item for item in FakeSmtpClient.sent if item["message"].get("X-Mailflow-Monitor-Token")]
 
 
 def test_transient_imap_failure_retries_same_token_without_resending(loaded_example_config) -> None:
+    """Verify transient IMAP failures poll the original token after the configured delay.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     from mailflow_monitor.models import TransientImapError
 
     class FlakyImap(FakeImapClient):
         tokens: list[str] = []
 
         def find_token(self, token, route_id, cleanup=False):
+            """Record tokens and fail the first lookup to exercise transient retries.
+
+            Args:
+                token: Delivery token supplied by the monitor.
+                route_id: Route ID supplied for matching.
+                cleanup: Whether this call requests deletion instead of read-only verification.
+
+            Returns:
+                True on subsequent lookups.
+
+            Raises:
+                TransientImapError: This is the first lookup.
+            """
             self.tokens.append(token)
             if len(self.tokens) == 1:
                 raise TransientImapError("network timeout")
@@ -406,10 +638,32 @@ def test_transient_imap_failure_retries_same_token_without_resending(loaded_exam
 
 
 def test_persistent_network_failure_reports_unverified_delivery(loaded_example_config) -> None:
+    """Verify network failure at the deadline reports unavailable verification.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     from mailflow_monitor.models import TransientImapError
 
     class OfflineImap(FakeImapClient):
         def find_token(self, token, route_id, cleanup=False):
+            """Simulate a persistent network outage for every lookup.
+
+            Args:
+                token: Delivery token supplied by the monitor.
+                route_id: Route ID supplied for matching.
+                cleanup: Whether this call requests deletion instead of read-only verification.
+
+            Returns:
+                Never returns normally.
+
+            Raises:
+                TransientImapError: Always raised to simulate an offline server.
+            """
             raise TransientImapError("network timeout")
 
     monitor = MailflowMonitor(
@@ -429,6 +683,16 @@ def test_cleanup_failure_keeps_delivery_healthy_and_retries_on_skipped_runs(
     loaded_example_config,
     fixed_now,
 ) -> None:
+    """Verify cleanup survives restart and retries without sending another test message.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+        fixed_now: Deterministic timezone-aware UTC timestamp supplied by the fixture.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     config = replace(
         loaded_example_config,
         routes=(loaded_example_config.routes[0],),
@@ -439,6 +703,19 @@ def test_cleanup_failure_keeps_delivery_healthy_and_retries_on_skipped_runs(
         cleanups = 0
 
         def find_token(self, token, route_id, cleanup=False):
+            """Accept delivery verification but count and reject cleanup attempts.
+
+            Args:
+                token: Delivery token supplied by the monitor.
+                route_id: Route ID supplied for matching.
+                cleanup: Whether this call requests deletion instead of read-only verification.
+
+            Returns:
+                True for read-only verification.
+
+            Raises:
+                ImapError: Cleanup was requested.
+            """
             if cleanup:
                 type(self).cleanups += 1
                 raise ImapError("cannot mark message deleted")
@@ -468,6 +745,15 @@ def test_cleanup_failure_keeps_delivery_healthy_and_retries_on_skipped_runs(
 
 
 def test_verified_message_is_cleaned_even_if_another_delivery_times_out(loaded_example_config):
+    """Verify partial route failure preserves cleanup work for the verified delivery.
+
+    Args:
+        loaded_example_config: Validated example configuration with state paths inside a temporary
+            directory.
+
+    Returns:
+        None; assertions verify the expected behavior.
+    """
     route = loaded_example_config.routes[0]
     route = replace(route, deliveries=(route.deliveries[0], route.deliveries[0]))
     config = replace(
@@ -480,6 +766,16 @@ def test_verified_message_is_cleaned_even_if_another_delivery_times_out(loaded_e
         cleaned = []
 
         def find_token(self, token, route_id, cleanup=False):
+            """Record cleanup tokens and recognize only the first delivery.
+
+            Args:
+                token: Delivery token supplied by the monitor.
+                route_id: Route ID supplied for matching.
+                cleanup: Whether this call requests deletion instead of read-only verification.
+
+            Returns:
+                True if the supplied token belongs to the first sent test message.
+            """
             if cleanup:
                 self.cleaned.append(token)
             return token == _sent_test_messages()[0]["message"]["X-Mailflow-Monitor-Token"]

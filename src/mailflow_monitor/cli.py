@@ -20,6 +20,17 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _parse_log_level(value: str) -> str:
+    """Normalize a CLI log level and adapt validation errors for argparse.
+
+    Args:
+        value: User-supplied level name; case and surrounding whitespace are ignored.
+
+    Returns:
+        Supported uppercase log-level name.
+
+    Raises:
+        argparse.ArgumentTypeError: The level is unsupported.
+    """
     try:
         return normalize_log_level(value)
     except ValueError as exc:
@@ -27,6 +38,14 @@ def _parse_log_level(value: str) -> str:
 
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add configuration-path and logging options to a subcommand.
+
+    Args:
+        parser: Argument parser to modify in place.
+
+    Returns:
+        None.
+    """
     parser.add_argument("--config", default="config.toml", help="path to TOML configuration")
     parser.add_argument(
         "--log-level",
@@ -40,7 +59,11 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI argument parser."""
+    """Build the parser for validation and check subcommands.
+
+    Returns:
+        Argument parser with common options and route-check flags registered.
+    """
 
     parser = argparse.ArgumentParser(prog="mailflow-monitor")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -65,7 +88,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint."""
+    """Run the requested CLI command and write its summary or error output.
+
+    Args:
+        argv: Arguments excluding the program name; None reads sys.argv[1:].
+
+    Returns:
+        Exit code: 0 for success, 1 for a failed route, 2 for invalid configuration, or 3 for a
+        runtime or notification failure.
+
+    Raises:
+        SystemExit: Argument parsing fails or the user requests help.
+    """
 
     parser = build_parser()
     args = parser.parse_args(argv)

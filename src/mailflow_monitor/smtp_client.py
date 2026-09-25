@@ -13,7 +13,18 @@ LOGGER = logging.getLogger(__name__)
 
 
 def create_tls_context(ca_file: str | None = None) -> ssl.SSLContext:
-    """Create a TLS context with certificate and hostname verification enabled."""
+    """Create a TLS context with certificate and hostname verification enabled.
+
+    Args:
+        ca_file: Optional PEM CA bundle path; None uses the default trust store.
+
+    Returns:
+        Client TLS context configured to verify the remote server.
+
+    Raises:
+        OSError: The custom CA file cannot be read.
+        ssl.SSLError: The CA data cannot be loaded.
+    """
 
     return ssl.create_default_context(cafile=ca_file)
 
@@ -22,10 +33,31 @@ class SmtpClient:
     """Send email through one configured SMTP account."""
 
     def __init__(self, config: SmtpConfig) -> None:
+        """Store SMTP settings for connections opened during sends.
+
+        Args:
+            config: SMTP host, credentials, TLS mode, and optional custom trust store.
+
+        Returns:
+            None.
+        """
         self.config = config
 
     def send_message(self, sender: str, recipients: list[str], message: EmailMessage) -> None:
-        """Send one message and close the SMTP connection afterwards."""
+        """Authenticate, send one message, and close the SMTP connection.
+
+        Args:
+            sender: Envelope sender email address.
+            recipients: Non-empty list of envelope recipient addresses.
+            message: Message headers and body to transmit.
+
+        Returns:
+            None. Success means the SMTP server accepted every envelope recipient.
+
+        Raises:
+            SmtpError: Recipients are missing/refused, plaintext is disallowed, or SMTP I/O fails.
+            OSError: The TLS context cannot be initialized from the configured CA file.
+        """
 
         if not recipients:
             raise SmtpError("SMTP: no recipients were provided")
@@ -54,6 +86,8 @@ class SmtpClient:
                 from_addr=sender,
                 to_addrs=recipients,
             )
+            # smtplib can return normally after accepting only some recipients.
+            # Treat any refusal as failure so partial delivery is not reported healthy.
             if refused_recipients:
                 raise SmtpError(
                     f"SMTP: {len(refused_recipients)} recipient(s) refused "
